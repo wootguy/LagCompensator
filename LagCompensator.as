@@ -4,9 +4,14 @@
 // - use BulletAccuracy method somehow
 // - disable damage+effects for non-rewind hits
 // - check underwater firing
+// - modern weps
+// - secondary gauss
+// - egon maybe
 
 const float MAX_LAG_COMPENSATION_TIME = 2; // 2 seconds
-bool debug_mode = true;
+bool debug_mode = false;
+string hitmarker_spr = "sprites/misc/mlg.spr";
+string hitmarker_snd = "misc/hitmarker.mp3";
 
 void PluginInit() 
 {
@@ -37,6 +42,10 @@ void init() {
 
 void MapInit() {
 	init();
+	
+	g_Game.PrecacheModel(hitmarker_spr);
+	g_SoundSystem.PrecacheSound(hitmarker_snd);
+	g_Game.PrecacheGeneric("sound/" + hitmarker_snd);
 }
 
 class LagBullet {
@@ -67,6 +76,7 @@ class LagEnt {
 	
 	EntState currentState; // only updated on shoots
 	array<EntState> history;
+	bool isRewound = false;
 	
 	LagEnt() {}
 	
@@ -316,11 +326,11 @@ bool didPlayerShoot(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFi
 void rewind_monsters(CBasePlayer@ plr) {
 	int iping, packetLoss;
 	g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
-	iping = 250;
+	//iping = 250;
 	
 	float ping = float(iping) / 1000.0f;
 	float shootTime = g_Engine.time - ping;
-	int bestHistoryIdx = 0;
+	
 
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
@@ -329,37 +339,47 @@ void rewind_monsters(CBasePlayer@ plr) {
 		}
 		
 		// get state closest to the time the player shot
-		if (bestHistoryIdx == 0) {
-			for (uint k = 0; k < laggyEnts[i].history.size(); k++) {
-				if (laggyEnts[i].history[k].time >= shootTime || k == laggyEnts[i].history.size()-1) {
-					bestHistoryIdx = k;
-					println("Best delta: " + int((laggyEnts[i].history[k].time - shootTime)*1000) + " for ping " + iping);
-					break;
-				}
+		int bestHistoryIdx = 0;
+		
+		for (uint k = 0; k < laggyEnts[i].history.size(); k++) {
+			if (laggyEnts[i].history[k].time >= shootTime || k == laggyEnts[i].history.size()-1) {
+				bestHistoryIdx = k;
+				println("Best delta: " + int((laggyEnts[i].history[k].time - shootTime)*1000) + " for ping " + iping);
+				break;
 			}
 		}
 		
-		EntState lastState = laggyEnts[i].history[bestHistoryIdx];
+		if (bestHistoryIdx == 0) {
+			continue;
+		}
 		
+		laggyEnts[i].isRewound = true;
 		laggyEnts[i].currentState.origin = mon.pev.origin;
 		laggyEnts[i].currentState.sequence = mon.pev.sequence;
 		laggyEnts[i].currentState.frame = mon.pev.frame;
 		laggyEnts[i].currentState.angles = mon.pev.angles;
 		
-		mon.pev.sequence = lastState.sequence;
-		mon.pev.frame = lastState.frame;
-		mon.pev.angles = lastState.angles;
-		g_EntityFuncs.SetOrigin(mon, lastState.origin);
+		EntState newState = laggyEnts[i].history[bestHistoryIdx]; // later than shoot time
+		EntState oldState = laggyEnts[i].history[bestHistoryIdx-1]; // earlier than shoot time
 		
-		if (debug_mode && false)
-			debug_rewind(mon, lastState);
+		// interpolate between states to get the exact position the monster was in when the player shot
+		// this probably won't matter much unless the server framerate is really low.
+		float t = (shootTime - oldState.time) / (newState.time - oldState.time);
+		
+		mon.pev.sequence = t >= 0.5f ? newState.sequence : oldState.sequence;
+		mon.pev.frame = oldState.frame + (newState.frame - oldState.frame)*t;
+		mon.pev.angles = t >= 0.5f ? newState.angles : oldState.angles;
+		g_EntityFuncs.SetOrigin(mon, oldState.origin + (newState.origin - oldState.origin)*t);
+		
+		if (debug_mode)
+			debug_rewind(mon, newState);
 	}
 }
 
 void undo_rewind_monsters() {
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
-		if (mon is null) {
+		if (mon is null or !laggyEnts[i].isRewound) {
 			continue;
 		}
 		
@@ -368,6 +388,8 @@ void undo_rewind_monsters() {
 		mon.pev.sequence = laggyEnts[i].currentState.sequence;
 		mon.pev.frame = laggyEnts[i].currentState.frame;
 		mon.pev.angles = laggyEnts[i].currentState.angles;
+		
+		laggyEnts[i].isRewound = false;
 	}
 }
 
@@ -385,6 +407,9 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire)
 	
 	Vector vecSrc = plr.GetGunPosition();
 	
+	int hits = 0;
+	
+	CBaseEntity@ target = null;
 	for (uint b = 0; b < lagBullets.size(); b++) {
 		LagBullet bullet = lagBullets[b];
 		TraceResult tr;
@@ -400,12 +425,30 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire)
 			g_WeaponFuncs.ClearMultiDamage();
 			mon.TraceAttack(plr.pev, bullet.damage, bullet.vecAim, tr, DMG_BULLET);
 			g_WeaponFuncs.ApplyMultiDamage(plr.pev, plr.pev);
+			@target = @phit;
 			
 			hit = true;
+			hits++;
 		}
 		
-		int life = 3;
-		te_beampoints(vecSrc, tr.vecEndPos, "sprites/laserbeam.spr", 0, 100, life, 2, 0, hit ? RED : GREEN);
+		if (debug_mode) {
+			int life = 3;
+			te_beampoints(vecSrc, tr.vecEndPos, "sprites/laserbeam.spr", 0, 100, life, 2, 0, hit ? RED : GREEN);
+		}
+	}
+	
+	if (hits > 0) {
+		HUDSpriteParams params;
+		params.flags = HUD_SPR_MASKED | HUD_ELEM_SCR_CENTER_X | HUD_ELEM_SCR_CENTER_Y;
+		params.spritename = hitmarker_spr.SubString("sprites/".Length());
+		params.holdTime = 0.5f;
+		params.x = 0;
+		params.y = 0;
+		params.color1 = RGBA( 255, 255, 255, 255 );
+		params.channel = 15;
+		g_PlayerFuncs.HudCustomSprite(plr, params);
+		
+		g_SoundSystem.PlaySound(target.edict(), CHAN_AUTO, hitmarker_snd, 1.0f, 0.0f, 0, 100, plr.entindex());
 	}
 	
 	undo_rewind_monsters();
@@ -429,8 +472,10 @@ HookReturnCode WeaponSecondaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep)
 
 HookReturnCode EntityCreated(CBaseEntity@ ent)
 {
-	if (ent.IsMonster())
+	if (ent.IsMonster() && ent.pev.classname != "cycler") {
+		//println("CREATED " + ent.pev.classname);
 		g_Scheduler.SetTimeout("refresh_ents", 0.0f);
+	}
 	return HOOK_CONTINUE;
 }
 
