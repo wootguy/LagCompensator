@@ -1,33 +1,12 @@
+#include "util"
+
+// TODO:
+// - use BulletAccuracy method somehow
+// - disable damage+effects for non-rewind hits
+// - check underwater firing
+
 const float MAX_LAG_COMPENSATION_TIME = 2; // 2 seconds
-
-class Color
-{ 
-	uint8 r, g, b, a;
-	Color() { r = g = b = a = 0; }
-	Color(uint8 r, uint8 g, uint8 b) { this.r = r; this.g = g; this.b = b; this.a = 255; }
-	Color(uint8 r, uint8 g, uint8 b, uint8 a) { this.r = r; this.g = g; this.b = b; this.a = a; }
-	Color(float r, float g, float b, float a) { this.r = uint8(r); this.g = uint8(g); this.b = uint8(b); this.a = uint8(a); }
-	Color (Vector v) { this.r = uint8(v.x); this.g = uint8(v.y); this.b = uint8(v.z); this.a = 255; }
-	string ToString() { return "" + r + " " + g + " " + b + " " + a; }
-	Vector getRGB() { return Vector(r, g, b); }
-}
-
-Color RED    = Color(255,0,0);
-Color GREEN  = Color(0,255,0);
-Color BLUE   = Color(0,0,255);
-Color YELLOW = Color(255,255,0);
-Color ORANGE = Color(255,127,0);
-Color PURPLE = Color(127,0,255);
-Color PINK   = Color(255,0,127);
-Color TEAL   = Color(0,255,255);
-Color WHITE  = Color(255,255,255);
-Color BLACK  = Color(0,0,0);
-Color GRAY  = Color(127,127,127);
-
-void te_beampoints(Vector start, Vector end, string sprite="sprites/laserbeam.spr", uint8 frameStart=0, uint8 frameRate=100, uint8 life=20, uint8 width=2, uint8 noise=0, Color c=GREEN, uint8 scroll=32, NetworkMessageDest msgType=MSG_BROADCAST, edict_t@ dest=null) { NetworkMessage m(msgType, NetworkMessages::SVC_TEMPENTITY, dest);m.WriteByte(TE_BEAMPOINTS);m.WriteCoord(start.x);m.WriteCoord(start.y);m.WriteCoord(start.z);m.WriteCoord(end.x);m.WriteCoord(end.y);m.WriteCoord(end.z);m.WriteShort(g_EngineFuncs.ModelIndex(sprite));m.WriteByte(frameStart);m.WriteByte(frameRate);m.WriteByte(life);m.WriteByte(width);m.WriteByte(noise);m.WriteByte(c.r);m.WriteByte(c.g);m.WriteByte(c.b);m.WriteByte(c.a);m.WriteByte(scroll);m.End(); }
-
-void print(string text) { g_Game.AlertMessage( at_console, text); }
-void println(string text) { print(text + "\n"); }
+bool debug_mode = true;
 
 void PluginInit() 
 {
@@ -36,10 +15,43 @@ void PluginInit()
 	
 	g_Hooks.RegisterHook( Hooks::Player::ClientSay, @ClientSay );
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponPrimaryAttack, @WeaponPrimaryAttack );
+	g_Hooks.RegisterHook( Hooks::Weapon::WeaponSecondaryAttack, @WeaponSecondaryAttack );
+	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
 	
 	refresh_ents();
 	
 	g_Scheduler.SetInterval("update_ent_history", 0.0f, -1);
+	g_Scheduler.SetInterval("refresh_player_shotgun_clip_counts", 1.0f, -1);
+	
+	init();
+}
+
+void init() {
+	last_shotgun_clips.resize(33);
+	last_shoot.resize(33);
+	for (int i = 0; i < 33; i++) {
+		last_shotgun_clips[i] = 8;
+		last_shoot[i] = 0;
+	}
+}
+
+void MapInit() {
+	init();
+}
+
+class LagBullet {
+	Vector vecAim;
+	float damage;
+	
+	LagBullet() {}
+	
+	LagBullet(Vector spread, float damage) {	
+		float x, y;
+		g_Utility.GetCircularGaussianSpread( x, y );
+		
+		this.vecAim = g_Engine.v_forward + x*spread.x*g_Engine.v_right + y*spread.y*g_Engine.v_up;
+		this.damage = damage;
+	}
 }
 
 class EntState {
@@ -53,6 +65,7 @@ class EntState {
 class LagEnt {
 	EHandle h_ent;
 	
+	EntState currentState; // only updated on shoots
 	array<EntState> history;
 	
 	LagEnt() {}
@@ -86,6 +99,9 @@ class LagEnt {
 }
 
 array<LagEnt> laggyEnts;
+array<float> g_bullet_damage;
+array<int> last_shotgun_clips; // needed to know if a player shot or not. None of the weapon props are reliable.
+array<float> last_shoot; // needed to calculate recoil. punchangle is not updated when shooting weapons.
 
 void refresh_ents() {
 	laggyEnts.resize(0);
@@ -98,6 +114,44 @@ void refresh_ents() {
 			laggyEnts.insertLast(ent);
 		}
 	} while(ent !is null);
+	
+	refresh_bullet_damages();
+}
+
+const int BULLET_UZI = 0;
+const int BULLET_GAUSS = 8;
+const int BULLET_GAUSS2 = 9;
+
+void refresh_bullet_damages() {
+	g_bullet_damage.resize(0);
+	g_bullet_damage.resize(10);
+	
+	g_bullet_damage[BULLET_UZI] = g_EngineFuncs.CVarGetFloat("sk_plr_uzi");
+	g_bullet_damage[BULLET_PLAYER_9MM] = g_EngineFuncs.CVarGetFloat("sk_plr_9mm_bullet");
+	g_bullet_damage[BULLET_PLAYER_MP5] = g_EngineFuncs.CVarGetFloat("sk_plr_9mmAR_bullet");
+	g_bullet_damage[BULLET_PLAYER_SAW] = g_EngineFuncs.CVarGetFloat("sk_556_bullet");
+	g_bullet_damage[BULLET_PLAYER_SNIPER] = g_EngineFuncs.CVarGetFloat("sk_plr_762_bullet");
+	g_bullet_damage[BULLET_PLAYER_357] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");
+	g_bullet_damage[BULLET_PLAYER_EAGLE] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");
+	g_bullet_damage[BULLET_PLAYER_BUCKSHOT] = g_EngineFuncs.CVarGetFloat("sk_plr_buckshot");
+	g_bullet_damage[BULLET_GAUSS] = g_EngineFuncs.CVarGetFloat("sk_plr_gauss");
+	g_bullet_damage[BULLET_GAUSS2] = g_EngineFuncs.CVarGetFloat("sk_plr_secondarygauss");
+}
+
+// sucks to have to do more polling but I can't think of any better way
+void refresh_player_shotgun_clip_counts() {
+	for ( int i = 1; i <= g_Engine.maxClients; i++ )
+	{
+		CBasePlayer@ p = g_PlayerFuncs.FindPlayerByIndex(i);
+		if (p is null or !p.IsConnected())
+			continue;
+		
+		CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(p.m_hActiveItem.GetEntity());
+		
+		if (wep !is null and wep.pev.classname == "weapon_shotgun") {
+			last_shotgun_clips[i] = wep.m_iClip;
+		}
+	}
 }
 
 void update_ent_history() {
@@ -110,125 +164,273 @@ void delay_kill(EHandle h_ent) {
 	g_EntityFuncs.Remove(h_ent);
 }
 
-void compensate(CBasePlayer@ plr) {
-	println("Compensate for plr!");
+void debug_rewind(CBaseMonster@ mon, EntState lastState) {
+	dictionary keys;
+	keys["origin"] = lastState.origin.ToString();
+	keys["angles"] = lastState.angles.ToString();
+	keys["model"] = string(mon.pev.model);
+	keys["rendermode"] = "1";
+	keys["renderamt"] = "128";
+	keys["spawnflags"] = "1";
+	CBaseMonster@ oldEnt = cast<CBaseMonster@>(g_EntityFuncs.CreateEntity("cycler", keys, true));
+	oldEnt.pev.solid = SOLID_NOT;
+	oldEnt.pev.movetype = MOVETYPE_NOCLIP;
 	
-	int replay_count = 0;
+	// reset to swim animation if no emote is playing
+	oldEnt.m_Activity = ACT_RELOAD;
+	oldEnt.pev.sequence = lastState.sequence;
+	oldEnt.pev.frame = lastState.frame;
+	oldEnt.ResetSequenceInfo();
+	oldEnt.pev.framerate = 0.00001f;
 	
+	g_Scheduler.SetTimeout("delay_kill", 1.0f, EHandle(oldEnt));
+}
+
+array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire) {
+	string cname = wep.pev.classname;
+	
+	float damage = 0;
+	Vector spread = Vector(0,0,0);
+	int bulletCount = 1;
+	
+	if (cname == "weapon_9mmhandgun") {
+		damage = g_bullet_damage[BULLET_PLAYER_9MM];
+		spread = isSecondaryFire ? Vector(0.1, 0.1, 0.1) : Vector(0.01, 0.01, 0.01);
+	}
+	else if (cname == "weapon_357") {
+		damage = g_bullet_damage[BULLET_PLAYER_357];
+		spread = VECTOR_CONE_3DEGREES;
+	}
+	else if (cname == "weapon_eagle") {
+		damage = g_bullet_damage[BULLET_PLAYER_357];
+		spread = VECTOR_CONE_4DEGREES;
+	}
+	else if (cname == "weapon_uzi") {
+		damage = g_bullet_damage[BULLET_PLAYER_MP5];
+		spread = VECTOR_CONE_8DEGREES;
+		if (wep.m_fIsAkimbo && wep.m_iClip > 0 && wep.m_iClip2 > 0) {
+			bulletCount++;
+		}
+	}
+	else if (cname == "weapon_9mmAR") {
+		damage = g_bullet_damage[BULLET_PLAYER_MP5];
+		spread = VECTOR_CONE_6DEGREES;
+	}
+	else if (cname == "weapon_shotgun") {
+		damage = g_bullet_damage[BULLET_PLAYER_BUCKSHOT];
+		spread = isSecondaryFire ? Vector( 0.17365, 0.04362, 0.00 ) : Vector( 0.08716, 0.04362, 0.00  );
+		bulletCount = isSecondaryFire ? 12 : 8;
+	}
+	else if (cname == "weapon_gauss") {
+		damage = g_bullet_damage[BULLET_GAUSS];
+		spread = VECTOR_CONE_1DEGREES;
+	}
+	else if (cname == "weapon_sniperrifle") {
+		damage = g_bullet_damage[BULLET_PLAYER_SNIPER];
+		spread = VECTOR_CONE_1DEGREES;
+	}
+	else if (cname == "weapon_m249") {
+		damage = g_bullet_damage[BULLET_PLAYER_SAW];
+		spread = VECTOR_CONE_1DEGREES;
+	} else {
+		println("Unsupported gun: " + cname);
+		bulletCount = 0;
+	}
+	
+	Math.MakeVectors(plr.pev.v_angle + plr.pev.punchangle + getEstimatedRecoil(plr, wep, isSecondaryFire));
+	
+	array<LagBullet> bullets;
+	for (int i = 0; i < bulletCount; i++) {
+		bullets.insertLast(LagBullet(spread, damage));
+	}
+	
+	return bullets;
+}
+
+Vector getEstimatedRecoil(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire) {
+	float lastShootDelta = g_Engine.time - last_shoot[plr.entindex()];
+	Vector recoil;
+
+	if (wep.pev.classname == "weapon_357" || wep.pev.classname == "weapon_eagle") {
+		if (lastShootDelta < 1) {
+			recoil.x = -(1-lastShootDelta)*8;
+		}
+	}
+	else if (wep.pev.classname == "weapon_eagle") {
+		if (lastShootDelta < 1) {
+			recoil.x = -(1-lastShootDelta)*8;
+		}
+	}
+
+	//println("RECOIL " + lastShootDelta + " " + recoil.x);
+
+	return recoil;
+}
+
+// primary fire hooks are called when reloading/empty/randomly
+// this makes sure a bullet was actually shot
+bool didPlayerShoot(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire) {
+	if (wep.pev.classname == "weapon_9mmhandgun") {
+		if (wep.m_bFireOnEmpty || wep.ShouldReload()) { // fireOnEmpty doesn't work for secondary fire
+			return false;
+		}
+	}
+	else if (wep.pev.classname == "weapon_shotgun") {
+		bool shooting = true;
+		
+		if (isSecondaryFire) {
+			shooting = last_shotgun_clips[plr.entindex()] >= 2; // TODO: this only works for double-shot mode
+		} else {
+			shooting = last_shotgun_clips[plr.entindex()] > 0 || !wep.m_bFireOnEmpty;
+		}
+		
+		last_shotgun_clips[plr.entindex()] = wep.m_iClip;
+		
+		if (!shooting) {
+			return false;
+		}
+	}
+	else if (wep.pev.classname == "weapon_uzi") {
+		if (wep.m_fIsAkimbo) {
+			if (wep.m_bFireOnEmpty && wep.m_iClip2 == 0) {
+				// Not perfect, but I really don't want to add more polling for this rare(?) edge case.
+				// The last bullet won't count if you:
+				//		1) shoot all bullets in both guns
+				// 		2) reload only the right gun
+				// 		3) shoot all bullets again
+				// 		4) reload only the left gun
+				// 		5) shoot all bullets again. The last bullet in your left gun won't count.
+				return false;
+			}
+		} else {
+			return !wep.m_bFireOnEmpty;
+		}
+	}
+	else if (isSecondaryFire || wep.m_bFireOnEmpty) {
+		return false;
+	}
+	
+	return true;
+}
+
+void rewind_monsters(CBasePlayer@ plr) {
+	int iping, packetLoss;
+	g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
+	iping = 250;
+	
+	float ping = float(iping) / 1000.0f;
+	float shootTime = g_Engine.time - ping;
+	int bestHistoryIdx = 0;
+
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
 		if (mon is null) {
 			continue;
 		}
 		
-		replay_count++;
-		
 		// get state closest to the time the player shot
-		EntState lastState = laggyEnts[i].history[0];
-		
-		{
-			int iping, packetLoss;
-			g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
-			
-			float ping = float(iping) / 1000.0f;
-			float shootTime = g_Engine.time - ping;
-			
+		if (bestHistoryIdx == 0) {
 			for (uint k = 0; k < laggyEnts[i].history.size(); k++) {
-				if (laggyEnts[i].history[k].time >= shootTime) {
-					lastState = laggyEnts[i].history[k];
+				if (laggyEnts[i].history[k].time >= shootTime || k == laggyEnts[i].history.size()-1) {
+					bestHistoryIdx = k;
+					println("Best delta: " + int((laggyEnts[i].history[k].time - shootTime)*1000) + " for ping " + iping);
 					break;
 				}
 			}
 		}
 		
-		Vector currentOrigin = mon.pev.origin;
-		int currentSequence = mon.pev.sequence;
-		float currentFrame = mon.pev.frame;
-		Vector currentAngles = mon.pev.angles;
+		EntState lastState = laggyEnts[i].history[bestHistoryIdx];
 		
+		laggyEnts[i].currentState.origin = mon.pev.origin;
+		laggyEnts[i].currentState.sequence = mon.pev.sequence;
+		laggyEnts[i].currentState.frame = mon.pev.frame;
+		laggyEnts[i].currentState.angles = mon.pev.angles;
 		
 		mon.pev.sequence = lastState.sequence;
 		mon.pev.frame = lastState.frame;
 		mon.pev.angles = lastState.angles;
 		g_EntityFuncs.SetOrigin(mon, lastState.origin);
 		
-		// debug
-		{
-			dictionary keys;
-			keys["origin"] = lastState.origin.ToString();
-			keys["angles"] = lastState.angles.ToString();
-			keys["model"] = string(mon.pev.model);
-			keys["rendermode"] = "1";
-			keys["renderamt"] = "128";
-			keys["spawnflags"] = "1";
-			CBaseMonster@ oldEnt = cast<CBaseMonster@>(g_EntityFuncs.CreateEntity("cycler", keys, true));
-			oldEnt.pev.solid = SOLID_NOT;
-			oldEnt.pev.movetype = MOVETYPE_NOCLIP;
-			
-			// reset to swim animation if no emote is playing
-			oldEnt.m_Activity = ACT_RELOAD;
-			oldEnt.pev.sequence = lastState.sequence;
-			oldEnt.pev.frame = lastState.frame;
-			oldEnt.ResetSequenceInfo();
-			oldEnt.pev.framerate = 0.00001f;
-			//oldEnt.pev.flags |= FL_SKIPLOCALHOST;
-			
-			g_Scheduler.SetTimeout("delay_kill", 1.0f, EHandle(oldEnt));
+		if (debug_mode && false)
+			debug_rewind(mon, lastState);
+	}
+}
+
+void undo_rewind_monsters() {
+	for (uint i = 0; i < laggyEnts.size(); i++) {
+		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
+		if (mon is null) {
+			continue;
 		}
-		
-		// hit detection for rewind monster
-		bool hit = false;
-		TraceResult tr;
-		
-		Math.MakeVectors( plr.pev.v_angle );
-		Vector vecAiming = g_Engine.v_forward;
-		
-		{
-			
-			
-			Vector vecSrc = plr.GetGunPosition();
-			
-			g_Utility.TraceLine( vecSrc, vecSrc + vecAiming*4096, dont_ignore_monsters, plr.edict(), tr );
-			
-			te_beampoints(vecSrc, tr.vecEndPos);
-			
-			CBaseEntity@ phit = g_EntityFuncs.Instance(tr.pHit);
-			if (phit !is null && phit.entindex() != 0) {
-				if (phit.entindex() == mon.entindex()) {
-					hit = true;
-					println("HIT " + phit.pev.classname + " " + phit.pev.solid);
-				}
-			}
-		}
-		
-		Vector originDelta = currentOrigin - lastState.origin;
 		
 		// move back to current position
-		g_EntityFuncs.SetOrigin(mon, currentOrigin);
-		mon.pev.sequence = currentSequence;
-		mon.pev.frame = currentFrame;
-		mon.pev.angles = currentAngles;
+		g_EntityFuncs.SetOrigin(mon, laggyEnts[i].currentState.origin);
+		mon.pev.sequence = laggyEnts[i].currentState.sequence;
+		mon.pev.frame = laggyEnts[i].currentState.frame;
+		mon.pev.angles = laggyEnts[i].currentState.angles;
+	}
+}
+
+void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire)
+{	
+	if (!didPlayerShoot(plr, wep, isSecondaryFire)) {
+		return;
+	}
+	
+	array<LagBullet> lagBullets = get_bullets(plr, wep, isSecondaryFire);
+	
+	println("SHOOT BULLETS " + wep.m_iClip + " " + wep.pev.classname + " " + lagBullets.size());
+	
+	rewind_monsters(plr);
+	
+	Vector vecSrc = plr.GetGunPosition();
+	
+	for (uint b = 0; b < lagBullets.size(); b++) {
+		LagBullet bullet = lagBullets[b];
+		TraceResult tr;
+		g_Utility.TraceLine( vecSrc, vecSrc + bullet.vecAim*8192, dont_ignore_monsters, plr.edict(), tr );
 		
-		if (hit) {
-			tr.vecEndPos = tr.vecEndPos + originDelta;
+		bool hit = false;
+		CBaseEntity@ phit = g_EntityFuncs.Instance(tr.pHit);
+		if (phit !is null && phit.IsMonster()) {
+			CBaseMonster@ mon = cast<CBaseMonster@>(phit);
+			// move the impact sprite closer to the where the monster currently is
+			//tr.vecEndPos = tr.vecEndPos + (currentOrigin - lastState.origin);
 			
 			g_WeaponFuncs.ClearMultiDamage();
-			mon.TraceAttack(plr.pev, 10, vecAiming, tr, DMG_BULLET);
+			mon.TraceAttack(plr.pev, bullet.damage, bullet.vecAim, tr, DMG_BULLET);
 			g_WeaponFuncs.ApplyMultiDamage(plr.pev, plr.pev);
+			
+			hit = true;
 		}
+		
+		int life = 3;
+		te_beampoints(vecSrc, tr.vecEndPos, "sprites/laserbeam.spr", 0, 100, life, 2, 0, hit ? RED : GREEN);
 	}
+	
+	undo_rewind_monsters();
+	
+	last_shoot[plr.entindex()] = g_Engine.time;
 	
 	//println("Replayed " + replay_count + " monsters");
 }
 
-void damage_effects() {
-	
-}
-
-
 HookReturnCode WeaponPrimaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep)
 {
-	compensate(plr);
+	compensate(plr, wep, false);
+	return HOOK_CONTINUE;
+}
+
+HookReturnCode WeaponSecondaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep)
+{
+	compensate(plr, wep, true);	
+	return HOOK_CONTINUE;
+}
+
+HookReturnCode EntityCreated(CBaseEntity@ ent)
+{
+	if (ent.IsMonster())
+		g_Scheduler.SetTimeout("refresh_ents", 0.0f);
 	return HOOK_CONTINUE;
 }
 
