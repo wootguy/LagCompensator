@@ -11,19 +11,26 @@
 // - average ping times?
 // - performance improvements: filter visible monsters before rewind?
 // - remove dead monsters
+// - gauss explosion broken?
 
 // minor todo:
-// - compensate against players too
+// - compensate in PvP
+// - compensate moving platforms somehow?
+// - compensate moving breakable solids and/or buttons
 // - egon maybe
 // - gauss reflections+explosions
+// - move blood effect closer to monster (required linking monsters to LagEnt)
+// - show monster info at rewind position
 
-// unfixable bugs:
-// - monsters bleed and react to being shot in the non-rewound position, but take no damage
+// unfixable(?) bugs:
+// - monsters bleed and react to being shot in the non-rewound position, but will take no damage
 //   - the blood effect can be disabled but has other side effects (no bleeding from projectiles or NPC bullets)
-// - custom weapons don't work automatically
+// - custom weapons don't work automatically, and might need code updates too
+// - skill CVars will show "0" damage for the supported weapons
 
 const float MAX_LAG_COMPENSATION_TIME = 1.0f; // 1 second
 const float BULLET_RANGE = 8192;
+const string CUSTOM_DAMAGE_KEY = "$f_lagc_dmg"; // used to restore custom damage values on lagged bullets
 string hitmarker_spr = "sprites/misc/mlg.spr";
 string hitmarker_snd = "misc/hitmarker.mp3";
 
@@ -37,6 +44,7 @@ array<int> last_shotgun_clips; // needed to know if a player shot or not. None o
 array<int> last_minigun_clips; // needed to know if a player shot or not. Seconday fire hook is called many times for a single bullet.
 array<float> last_shoot; // needed to calculate recoil. punchangle is not updated when shooting weapons.
 array<float> gauss_start_charge;
+dictionary g_supported_weapons;
 
 dictionary g_player_states;
 int g_state_count = 0;
@@ -51,17 +59,21 @@ void PluginInit()
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponSecondaryAttack, @WeaponSecondaryAttack );
 	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerPreThink, @PlayerPreThink );
-	g_Hooks.RegisterHook( Hooks::Player::PlayerPostThink, @PlayerPostThink );
 	
 	g_Scheduler.SetInterval("update_ent_history", 0.0f, -1);
 	g_Scheduler.SetInterval("refresh_cvars", 5.0f, -1);
-	g_Scheduler.SetInterval("refresh_player_shotgun_clip_counts", 1.0f, -1);
+	g_Scheduler.SetInterval("refresh_player_states", 1.0f, -1);
 	
 	init();
 	
-	if (g_Engine.time > 2) {
-		// This has to be called after MapActivate or else the mp5 sounds like a pistol and reloads after every shot (wtf??).
+	if (g_Engine.time > 4) { // plugin reloaded mid-map?
 		check_classic_mode();
+		late_init();
+		
+		// reload skill settings
+		string map_skill_file = "" + g_Engine.mapname + "_skl.cfg";
+		g_EngineFuncs.ServerCommand("exec skill.cfg; exec " + map_skill_file + ";\n");
+		g_EngineFuncs.ServerExecute();
 	}
 	refresh_ents();
 	refresh_cvars();
@@ -78,6 +90,19 @@ void init() {
 		last_shoot[i] = 0;
 		gauss_start_charge[0] = -1;
 	}
+	
+	g_supported_weapons.clear();
+	g_supported_weapons["weapon_9mmhandgun"] = true;
+	g_supported_weapons["weapon_357"] = true;
+	g_supported_weapons["weapon_eagle"] = true;
+	g_supported_weapons["weapon_uzi"] = true;
+	g_supported_weapons["weapon_9mmAR"] = true;
+	g_supported_weapons["weapon_shotgun"] = true;
+	g_supported_weapons["weapon_gauss"] = true;
+	g_supported_weapons["weapon_sniperrifle"] = true;
+	g_supported_weapons["weapon_m249"] = true;
+	g_supported_weapons["weapon_m16"] = true;
+	g_supported_weapons["weapon_minigun"] = true;
 }
 
 void MapInit() {
@@ -90,14 +115,47 @@ void MapInit() {
 
 void MapActivate() {
 	check_classic_mode();
+	g_Scheduler.SetTimeout("late_init", 2);
 }
 
 void check_classic_mode() {
 	// if the mp5 has secondary ammo, then we're probably in classic mode.
 	// plugins can't access the classic mode API for some reason.
+	// This has to be called after MapActivate or else the mp5 sounds like a pistol and reloads after every shot (wtf??).
 	CBasePlayerWeapon@ mp5 = cast<CBasePlayerWeapon@>(g_EntityFuncs.Create("weapon_9mmAR", Vector(0,0,0), Vector(0,0,0), false));
 	is_classic_mode = mp5.iMaxAmmo2() != -1;
 	g_EntityFuncs.Remove(mp5);
+}
+
+void late_init() {
+	g_bullet_damage.resize(0);
+	g_bullet_damage.resize(10);
+	
+	g_bullet_damage[BULLET_UZI] = g_EngineFuncs.CVarGetFloat("sk_plr_uzi");
+	g_bullet_damage[BULLET_PLAYER_9MM] = g_EngineFuncs.CVarGetFloat("sk_plr_9mm_bullet");
+	g_bullet_damage[BULLET_PLAYER_MP5] = g_EngineFuncs.CVarGetFloat("sk_plr_9mmAR_bullet");
+	g_bullet_damage[BULLET_PLAYER_SAW] = g_EngineFuncs.CVarGetFloat("sk_556_bullet");
+	g_bullet_damage[BULLET_PLAYER_SNIPER] = g_EngineFuncs.CVarGetFloat("sk_plr_762_bullet");
+	g_bullet_damage[BULLET_PLAYER_357] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");
+	g_bullet_damage[BULLET_PLAYER_BUCKSHOT] = g_EngineFuncs.CVarGetFloat("sk_plr_buckshot");
+	g_bullet_damage[BULLET_GAUSS] = g_EngineFuncs.CVarGetFloat("sk_plr_gauss");
+	g_bullet_damage[BULLET_GAUSS2] = g_EngineFuncs.CVarGetFloat("sk_plr_secondarygauss");
+	
+	disable_default_damages();
+}
+
+void disable_default_damages() {
+	// all damage will be done by this plugin or with the custom weapon damage keyvalue
+	// otherwise enemies can be hit twice by the same bullet (sven bullet + plugin bullet)
+	g_EngineFuncs.CVarSetFloat("sk_plr_uzi", 0);
+	g_EngineFuncs.CVarSetFloat("sk_plr_9mm_bullet", 0);
+	g_EngineFuncs.CVarSetFloat("sk_plr_9mmAR_bullet", 0);
+	g_EngineFuncs.CVarSetFloat("sk_556_bullet", 0);
+	g_EngineFuncs.CVarSetFloat("sk_plr_762_bullet", 0);
+	g_EngineFuncs.CVarSetFloat("sk_plr_357_bullet", 0);
+	g_EngineFuncs.CVarSetFloat("sk_plr_buckshot", 0);
+	g_EngineFuncs.CVarSetFloat("sk_plr_gauss", 0);
+	g_EngineFuncs.CVarSetFloat("sk_plr_secondarygauss", 0);
 }
 
 enum AdjustModes {
@@ -197,26 +255,34 @@ const int BULLET_GAUSS = 8;
 const int BULLET_GAUSS2 = 9;
 
 void refresh_cvars() {
-	g_bullet_damage.resize(0);
-	g_bullet_damage.resize(10);
+	// update bullet damages if cvars were changed mid-map
+	array<float> changed_damages;
+	changed_damages.resize(10);
 	
-	g_bullet_damage[BULLET_UZI] = g_EngineFuncs.CVarGetFloat("sk_plr_uzi");
-	g_bullet_damage[BULLET_PLAYER_9MM] = g_EngineFuncs.CVarGetFloat("sk_plr_9mm_bullet");
-	g_bullet_damage[BULLET_PLAYER_MP5] = g_EngineFuncs.CVarGetFloat("sk_plr_9mmAR_bullet");
-	g_bullet_damage[BULLET_PLAYER_SAW] = g_EngineFuncs.CVarGetFloat("sk_556_bullet");
-	g_bullet_damage[BULLET_PLAYER_SNIPER] = g_EngineFuncs.CVarGetFloat("sk_plr_762_bullet");
-	g_bullet_damage[BULLET_PLAYER_357] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");
-	g_bullet_damage[BULLET_PLAYER_EAGLE] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");
-	g_bullet_damage[BULLET_PLAYER_BUCKSHOT] = g_EngineFuncs.CVarGetFloat("sk_plr_buckshot");
-	g_bullet_damage[BULLET_GAUSS] = g_EngineFuncs.CVarGetFloat("sk_plr_gauss");
-	g_bullet_damage[BULLET_GAUSS2] = g_EngineFuncs.CVarGetFloat("sk_plr_secondarygauss");
+	changed_damages[BULLET_UZI] = g_EngineFuncs.CVarGetFloat("sk_plr_uzi");
+	changed_damages[BULLET_PLAYER_9MM] = g_EngineFuncs.CVarGetFloat("sk_plr_9mm_bullet");
+	changed_damages[BULLET_PLAYER_MP5] = g_EngineFuncs.CVarGetFloat("sk_plr_9mmAR_bullet");
+	changed_damages[BULLET_PLAYER_SAW] = g_EngineFuncs.CVarGetFloat("sk_556_bullet");
+	changed_damages[BULLET_PLAYER_SNIPER] = g_EngineFuncs.CVarGetFloat("sk_plr_762_bullet");
+	changed_damages[BULLET_PLAYER_357] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");
+	changed_damages[BULLET_PLAYER_BUCKSHOT] = g_EngineFuncs.CVarGetFloat("sk_plr_buckshot");
+	changed_damages[BULLET_GAUSS] = g_EngineFuncs.CVarGetFloat("sk_plr_gauss");
+	changed_damages[BULLET_GAUSS2] = g_EngineFuncs.CVarGetFloat("sk_plr_secondarygauss");
 	
+	for (int i = 0; i < 10; i++) {
+		if (changed_damages[i] != 0) {
+			g_bullet_damage[i] = changed_damages[i];
+		}
+	}
+	
+	disable_default_damages();
+	
+	// these can also change mid-map
 	shotgun_doubleshot_mode = g_EngineFuncs.CVarGetFloat("weaponmode_shotgun") == 1;
 	pistol_silencer_mode = g_EngineFuncs.CVarGetFloat("weaponmode_9mmhandgun") == 1;
 }
 
-// sucks to have to do more polling but I can't think of any better way
-void refresh_player_shotgun_clip_counts() {
+void refresh_player_states() {
 	for ( int i = 1; i <= g_Engine.maxClients; i++ )
 	{
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
@@ -225,13 +291,40 @@ void refresh_player_shotgun_clip_counts() {
 		
 		CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
 		
-		if (wep !is null) {
-		
+		if (wep !is null && g_supported_weapons.exists(wep.pev.classname)) {
 			if (wep.pev.classname == "weapon_shotgun") {
 				last_shotgun_clips[i] = wep.m_iClip;
 			}
 			if (wep.pev.classname == "weapon_minigun") {
 				last_minigun_clips[i] = plr.m_rgAmmo(wep.m_iPrimaryAmmoType);
+			}
+			
+			PlayerState@ state = getPlayerState(plr);			
+			
+			if (state.enabled && wep.m_flCustomDmg != 0) {
+				bool usesDefaultDamage = wep.m_flCustomDmg < 1.0f;
+				
+				if (!usesDefaultDamage) {
+					// save current custom damage, so it can be used later
+					KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
+					CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+					pCustom.SetKeyvalue(CUSTOM_DAMAGE_KEY, wep.m_flCustomDmg);
+					//println("Saved custom damage");
+				}
+				
+				// prevent sven code from doing damage with this weapon (0 = use cvar, and cvars are set to do 0 damage)
+				wep.m_flCustomDmg = 0;
+			} else if (!state.enabled && wep.m_flCustomDmg == 0) {
+				KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
+				CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+				if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
+					CustomKeyvalue dmgKey( pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ) );
+					wep.m_flCustomDmg = dmgKey.GetFloat();
+					//println("Restored custom damage " + wep.m_flCustomDmg);
+				} else {
+					// restore cvar damage
+					wep.m_flCustomDmg = get_bullet_damage(wep.pev.classname);
+				}
 			}
 		}
 	}
@@ -265,6 +358,32 @@ void debug_rewind(CBaseMonster@ mon, EntState lastState) {
 	oldEnt.pev.framerate = 0.00001f;
 	
 	g_Scheduler.SetTimeout("delay_kill", 1.0f, EHandle(oldEnt));
+}
+
+float get_bullet_damage(string cname) {
+	if (cname == "weapon_9mmhandgun") {
+		return g_bullet_damage[BULLET_PLAYER_9MM];
+	}
+	else if (cname == "weapon_357" || cname == "weapon_eagle") {
+		return g_bullet_damage[BULLET_PLAYER_357];
+	}
+	else if (cname == "weapon_uzi" || cname == "weapon_9mmAR") {
+		return g_bullet_damage[BULLET_PLAYER_MP5];
+	}
+	else if (cname == "weapon_shotgun") {
+		return g_bullet_damage[BULLET_PLAYER_BUCKSHOT];
+	}
+	else if (cname == "weapon_gauss") {
+		return g_bullet_damage[BULLET_GAUSS];
+	}
+	else if (cname == "weapon_sniperrifle") {
+		return g_bullet_damage[BULLET_PLAYER_SNIPER];
+	}
+	else if (cname == "weapon_m249" || cname == "weapon_m16" || cname == "weapon_minigun") {
+		return g_bullet_damage[BULLET_PLAYER_SAW];
+	}
+	
+	return 0; // whatever the cvar default is
 }
 
 array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire) {
@@ -339,6 +458,13 @@ array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSe
 	
 	Math.MakeVectors(plr.pev.v_angle + getEstimatedRecoil(plr, wep, isSecondaryFire));
 	
+	KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
+	CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+	if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
+		CustomKeyvalue dmgKey( pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ) );
+		damage = dmgKey.GetFloat();
+	}
+	
 	array<LagBullet> bullets;
 	for (int i = 0; i < bulletCount; i++) {
 		bullets.insertLast(LagBullet(spread, damage));
@@ -401,7 +527,7 @@ bool didPlayerShoot(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFi
 		}
 	}
 	else if (wep.pev.classname == "weapon_uzi") {
-		if (plr.pev.waterlevel == 3) {
+		if (plr.pev.waterlevel == 3 || isSecondaryFire) {
 			return false;
 		}
 	
@@ -563,7 +689,7 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 	PlayerState@ state = getPlayerState(plr);
 	
 	if (!state.enabled) {
-		return; // compensation disabled
+		return;
 	}
 	
 	if (!force_shoot && !didPlayerShoot(plr, wep, isSecondaryFire)) {
@@ -580,7 +706,7 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 	if (wep.pev.classname == "weapon_minigun") {
 		clip = plr.m_rgAmmo(wep.m_iPrimaryAmmoType);
 	}
-	println("SHOOT BULLETS " + clip + " " + wep.pev.classname + " " + lagBullets.size() + " " + plr.pev.maxspeed);
+	//println("SHOOT BULLETS " + clip + " " + wep.pev.classname + " " + lagBullets.size() + " " + plr.pev.maxspeed);
 	
 	rewind_monsters(plr, state);
 	
@@ -596,18 +722,19 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 		
 		bool hit = false;
 		CBaseEntity@ phit = g_EntityFuncs.Instance(tr.pHit);
-		if (phit !is null && phit.IsMonster()) {
-			CBaseMonster@ mon = cast<CBaseMonster@>(phit);
-			// move the impact sprite closer to the where the monster currently is
-			//tr.vecEndPos = tr.vecEndPos + (currentOrigin - lastState.origin);
+		if (phit !is null) {
+			if (phit.IsMonster()) {	
+				// move the impact sprite closer to the where the monster currently is
+				//tr.vecEndPos = tr.vecEndPos + (currentOrigin - lastState.origin);
+			
+				@target = @phit;
+				hit = true;
+				hits++;
+			}
 			
 			g_WeaponFuncs.ClearMultiDamage();
-			mon.TraceAttack(plr.pev, bullet.damage, bullet.vecAim, tr, DMG_BULLET | DMG_NEVERGIB);
+			phit.TraceAttack(plr.pev, bullet.damage, bullet.vecAim, tr, DMG_BULLET | DMG_NEVERGIB);
 			g_WeaponFuncs.ApplyMultiDamage(plr.pev, plr.pev);
-			@target = @phit;
-			
-			hit = true;
-			hits++;
 		}
 		
 		if (state.debug > 1) {
@@ -659,16 +786,18 @@ HookReturnCode EntityCreated(CBaseEntity@ ent)
 	return HOOK_CONTINUE;
 }
 
-HookReturnCode PlayerPreThink(CBasePlayer@ plr, uint&out test) {
-	
+HookReturnCode PlayerPreThink(CBasePlayer@ plr, uint&out test) {		
+	// need to poll to know when a player released the secondary fire button for gauss chargeup
 	float startCharge = gauss_start_charge[plr.entindex()];
 	if (startCharge != -1) {
 		CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-		if (wep !is null && wep.pev.classname == "weapon_gauss") {	
+		
+		if (wep !is null and wep.pev.classname == "weapon_gauss") {	
 			if (plr.pev.button & IN_ATTACK2 == 0 || plr.m_rgAmmo(wep.m_iPrimaryAmmoType) == 0) {
 				float chargeTime = g_Engine.time - startCharge;
 				
 				if (chargeTime > 0.5f) { // minimum charge time passed?
+					// player must have just shot
 					compensate(plr, wep, true, 1, true);
 					gauss_start_charge[plr.entindex()] = -1;
 				}
@@ -679,10 +808,6 @@ HookReturnCode PlayerPreThink(CBasePlayer@ plr, uint&out test) {
 		}
 	}
 	
-	return HOOK_CONTINUE;
-}
-
-HookReturnCode PlayerPostThink(CBasePlayer@ plr) {	
 	return HOOK_CONTINUE;
 }
 
@@ -792,6 +917,9 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 					mode = " (ping + " + state.compensation + "ms)";
 				} else if (state.adjustMode == ADJUST_SUB) {
 					mode = " (ping - " + state.compensation + "ms)";
+				}
+				if (!state.enabled) {
+					mode = "";
 				}
 				
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nYour settings:\n');
