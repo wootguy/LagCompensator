@@ -8,6 +8,9 @@
 // - disable damage for non-rewind position
 //    - but still work with breakables/solids
 // - custom weapon damage values
+// - average ping times?
+// - performance improvements: filter visible monsters before rewind?
+// - remove dead monsters
 
 // minor todo:
 // - compensate against players too
@@ -20,7 +23,7 @@
 // - custom weapons don't work automatically
 
 const float MAX_LAG_COMPENSATION_TIME = 1.0f; // 1 second
-bool debug_mode = true;
+const float BULLET_RANGE = 8192;
 string hitmarker_spr = "sprites/misc/mlg.spr";
 string hitmarker_snd = "misc/hitmarker.mp3";
 
@@ -34,6 +37,9 @@ array<int> last_shotgun_clips; // needed to know if a player shot or not. None o
 array<int> last_minigun_clips; // needed to know if a player shot or not. Seconday fire hook is called many times for a single bullet.
 array<float> last_shoot; // needed to calculate recoil. punchangle is not updated when shooting weapons.
 array<float> gauss_start_charge;
+
+dictionary g_player_states;
+int g_state_count = 0;
 
 void PluginInit() 
 {
@@ -53,7 +59,10 @@ void PluginInit()
 	
 	init();
 	
-	check_classic_mode();
+	if (g_Engine.time > 2) {
+		// This has to be called after MapActivate or else the mp5 sounds like a pistol and reloads after every shot (wtf??).
+		check_classic_mode();
+	}
 	refresh_ents();
 	refresh_cvars();
 }
@@ -89,6 +98,25 @@ void check_classic_mode() {
 	CBasePlayerWeapon@ mp5 = cast<CBasePlayerWeapon@>(g_EntityFuncs.Create("weapon_9mmAR", Vector(0,0,0), Vector(0,0,0), false));
 	is_classic_mode = mp5.iMaxAmmo2() != -1;
 	g_EntityFuncs.Remove(mp5);
+}
+
+enum AdjustModes {
+	ADJUST_NONE, // use ping value
+	ADJUST_ADD, // add to ping value
+	ADJUST_SUB // subtract from ping value
+}
+
+class PlayerState
+{
+	// Never store player handle? It needs to be set to null on disconnect or else states start sharing
+	// player handles and cause weird bugs or break states entirely. Check if disconnect is called
+	// if player leaves during level change.
+
+	bool enabled = true;
+	int compensation = 0;
+	int adjustMode = 0;
+	int debug = 0;
+	bool hitmarker = true;
 }
 
 class LagBullet {
@@ -210,8 +238,10 @@ void refresh_player_shotgun_clip_counts() {
 }
 
 void update_ent_history() {
+	g_state_count = 0;
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		laggyEnts[i].update_history();
+		g_state_count += laggyEnts[i].history.size();
 	}
 }
 
@@ -225,17 +255,13 @@ void debug_rewind(CBaseMonster@ mon, EntState lastState) {
 	keys["angles"] = lastState.angles.ToString();
 	keys["model"] = string(mon.pev.model);
 	keys["rendermode"] = "1";
-	keys["renderamt"] = "128";
-	keys["spawnflags"] = "1";
+	keys["renderamt"] = "200";
 	CBaseMonster@ oldEnt = cast<CBaseMonster@>(g_EntityFuncs.CreateEntity("cycler", keys, true));
 	oldEnt.pev.solid = SOLID_NOT;
 	oldEnt.pev.movetype = MOVETYPE_NOCLIP;
 	
-	// reset to swim animation if no emote is playing
-	oldEnt.m_Activity = ACT_RELOAD;
 	oldEnt.pev.sequence = lastState.sequence;
 	oldEnt.pev.frame = lastState.frame;
-	oldEnt.ResetSequenceInfo();
 	oldEnt.pev.framerate = 0.00001f;
 	
 	g_Scheduler.SetTimeout("delay_kill", 1.0f, EHandle(oldEnt));
@@ -425,20 +451,46 @@ bool didPlayerShoot(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFi
 	return true;
 }
 
-void rewind_monsters(CBasePlayer@ plr) {
-	int iping, packetLoss;
-	g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
-	//iping = 250;
+int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
+	
+	int iping;
+	
+	if (state.adjustMode == ADJUST_NONE) {
+		if (state.compensation > 0) {
+			iping = state.compensation;
+		} else {
+			int packetLoss;
+			g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
+		}
+	} else {
+		int packetLoss;
+		g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
+			
+		if (state.adjustMode == ADJUST_ADD) {
+			iping += state.compensation;
+		} else {
+			iping -= state.compensation;
+		}
+	}
+	
+	if (state.debug > 0) {
+		string shift = "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
+		g_PlayerFuncs.PrintKeyBindingString(plr, shift + "Compensation: " + iping + " ms\n" + 
+			"Rewind FPS: " + (g_state_count / laggyEnts.size()));
+	}
 	
 	float ping = float(iping) / 1000.0f;
 	float shootTime = g_Engine.time - ping;
 	
+	int rewind_count = 0;
 
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
 		if (mon is null) {
 			continue;
 		}
+		
+		rewind_count++;
 		
 		// get state closest to the time the player shot
 		int bestHistoryIdx = 0;
@@ -473,15 +525,17 @@ void rewind_monsters(CBasePlayer@ plr) {
 		mon.pev.angles = t >= 0.5f ? newState.angles : oldState.angles;
 		g_EntityFuncs.SetOrigin(mon, oldState.origin + (newState.origin - oldState.origin)*t);
 		
-		if (debug_mode)
+		if (state.debug > 1)
 			debug_rewind(mon, newState);
 	}
+	
+	return rewind_count;
 }
 
 void undo_rewind_monsters() {
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
-		if (mon is null or !laggyEnts[i].isRewound) {
+		if (!laggyEnts[i].isRewound or mon is null) {
 			continue;
 		}
 		
@@ -505,7 +559,13 @@ void delay_compensate(EHandle h_plr, EHandle h_wep, bool isSecondaryFire, int bu
 }
 
 void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, int burst_round=1, bool force_shoot=false)
-{	
+{
+	PlayerState@ state = getPlayerState(plr);
+	
+	if (!state.enabled) {
+		return; // compensation disabled
+	}
+	
 	if (!force_shoot && !didPlayerShoot(plr, wep, isSecondaryFire)) {
 		return;
 	}
@@ -522,7 +582,7 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 	}
 	println("SHOOT BULLETS " + clip + " " + wep.pev.classname + " " + lagBullets.size() + " " + plr.pev.maxspeed);
 	
-	rewind_monsters(plr);
+	rewind_monsters(plr, state);
 	
 	Vector vecSrc = plr.GetGunPosition();
 	
@@ -532,7 +592,7 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 	for (uint b = 0; b < lagBullets.size(); b++) {
 		LagBullet bullet = lagBullets[b];
 		TraceResult tr;
-		g_Utility.TraceLine( vecSrc, vecSrc + bullet.vecAim*8192, dont_ignore_monsters, plr.edict(), tr );
+		g_Utility.TraceLine( vecSrc, vecSrc + bullet.vecAim*BULLET_RANGE, dont_ignore_monsters, plr.edict(), tr );
 		
 		bool hit = false;
 		CBaseEntity@ phit = g_EntityFuncs.Instance(tr.pHit);
@@ -550,20 +610,23 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 			hits++;
 		}
 		
-		if (debug_mode) {
+		if (state.debug > 1) {
 			int life = 3;
 			te_beampoints(vecSrc, tr.vecEndPos, "sprites/laserbeam.spr", 0, 100, life, 2, 0, hit ? RED : GREEN);
 		}
 	}
 	
-	if (hits > 0) {
+	if (hits > 0 && state.hitmarker) {
 		HUDSpriteParams params;
-		params.flags = HUD_SPR_MASKED | HUD_ELEM_SCR_CENTER_X | HUD_ELEM_SCR_CENTER_Y;
+		params.flags = HUD_SPR_MASKED | HUD_ELEM_SCR_CENTER_X | HUD_ELEM_SCR_CENTER_Y | HUD_ELEM_EFFECT_ONCE;
 		params.spritename = hitmarker_spr.SubString("sprites/".Length());
 		params.holdTime = 0.5f;
 		params.x = 0;
 		params.y = 0;
 		params.color1 = RGBA( 255, 255, 255, 255 );
+		params.color2 = RGBA(255, 255, 255, 0);
+		params.fxTime = 0.8f;
+		params.effect = HUD_EFFECT_RAMP_UP;
 		params.channel = 15;
 		g_PlayerFuncs.HudCustomSprite(plr, params);
 		
@@ -573,8 +636,6 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 	undo_rewind_monsters();
 	
 	last_shoot[plr.entindex()] = g_Engine.time;
-	
-	//println("Replayed " + replay_count + " monsters");
 }
 
 HookReturnCode WeaponPrimaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep)
@@ -625,14 +686,127 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	return HOOK_CONTINUE;
 }
 
-bool doCommand(CBasePlayer@ plr, const CCommand@ args)
-{	
+bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=false)
+{
+	PlayerState@ state = getPlayerState(plr);
 	bool isAdmin = g_PlayerFuncs.AdminLevel(plr) >= ADMIN_YES;
 	
 	if ( args.ArgC() > 0 )
 	{
-		if (args[0] == "y") {
-			refresh_ents();
+		if (args[0] == ".lagc") {
+			if (args.ArgC() > 1) {
+				string arg = args[1];
+				
+				if (arg == "info") {
+					state.debug = state.debug == 0 ? 1 : 0;
+					g_PlayerFuncs.SayText(plr, "Lag compensation info " + (state.debug > 0 ? "enabled" : "disabled") + "\n");
+				} 
+				else if (arg == "x" || arg == "hitmarker") {
+					state.hitmarker = !state.hitmarker;
+					g_PlayerFuncs.SayText(plr, "Lag compensation hitmarker " + (state.hitmarker ? "enabled" : "disabled") + "\n");
+				}
+				else if (arg == "debug") {
+					state.debug = state.debug == 0 ? 2 : 0;
+					g_PlayerFuncs.SayText(plr, "Lag compensation debug mode " + (state.debug > 0 ? "enabled" : "disabled") + "\n");
+				}
+				else if (arg == "on") {
+					state.enabled = true;
+					state.compensation = -1;
+					g_PlayerFuncs.SayText(plr, "Lag compensation enabled (auto)\n");
+				}
+				else if (arg == "off") {
+					state.enabled = false;
+					state.compensation = 0;
+					state.adjustMode = ADJUST_NONE;
+					g_PlayerFuncs.SayText(plr, "Lag compensation disabled\n");
+				}
+				else if (arg == "toggle") {
+					state.enabled = !state.enabled;
+					state.compensation = 0;
+					state.adjustMode = ADJUST_NONE;
+					g_PlayerFuncs.SayText(plr, "Lag compensation " + (state.enabled ? "enabled" : "disabled") + "\n");
+				}
+				else if (arg == "auto") {
+					state.enabled = false;
+					state.compensation = 0;
+					g_PlayerFuncs.SayText(plr, "Lag compensation set to auto\n");
+				} 
+				else {
+					int adjustMode = ADJUST_ADD;
+					
+					if (arg[0] == '=') {
+						adjustMode = ADJUST_NONE;
+						arg = arg.SubString(1);
+						println("NEWARG " + arg);
+					}
+					else if (arg[0] == '-') {
+						adjustMode = ADJUST_SUB;
+						arg = arg.SubString(1);
+					}
+					
+					int amt = Math.min(atoi(arg), int(MAX_LAG_COMPENSATION_TIME*1000));
+					if (amt < -1) {
+						amt = -1;
+					}
+					
+					state.compensation = amt;
+					state.adjustMode = adjustMode;
+					
+					if (adjustMode == ADJUST_NONE) {
+						g_PlayerFuncs.SayText(plr, "Lag compensation set to " + state.compensation + "ms\n");
+					} else {
+						string prefix = adjustMode == ADJUST_ADD ? "ping + " : "ping - ";
+						g_PlayerFuncs.SayText(plr, "Lag compensation set to " + prefix + state.compensation + "ms\n");
+					}
+				}				
+			} else {
+				int maxComp = int(MAX_LAG_COMPENSATION_TIME*1000);
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '-----------------------------Lag Compensation Commands-----------------------------\n\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, 'Lag compensation "rewinds" enemies so that you don\'t have to aim ahead of them to get a hit.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nType ".lagc [on/off/toggle]" to enable or disable lag compensation.\n');
+				
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nIf you still need to aim ahead/behind enemies to hit them, then try one of these commands:\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc +X" to increase compensation.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc -X" to decrease compensation.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc =X" to set a specific compensation.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc auto" to use the default compensation.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    X = milliseconds, a number between 0 and ' + maxComp + '.\n');
+				
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nIf you\'re unsure how to adjust compensation, try these commands:\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc info" to toggle compensation messages.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        This will show your compensation ping when you shoot.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        Try matching it with the ping you see in net_graph.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        The net_graph ping might be more accurate than the scoreboard.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        To turn on net_graph, type \'net_graph 2\' in this console.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc x" to toggle hit confirmations.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        This will make it obvious when you hit a target. Blood effects\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        are unreliable due to how this plugin works.\n');
+				
+				if (isAdmin) {
+					g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nAdmins only:');
+					g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\n    Type ".lagc debug" to toggle compensation visualizations.\n        - This may cause extreme lag and/or desyncs!\n');
+				}
+				
+				string mode = " (auto)";
+				if (state.adjustMode == ADJUST_ADD) {
+					mode = " (ping + " + state.compensation + "ms)";
+				} else if (state.adjustMode == ADJUST_SUB) {
+					mode = " (ping - " + state.compensation + "ms)";
+				}
+				
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nYour settings:\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Compensation is ' + (state.enabled ? 'enabled' : 'disabled') + mode + '\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Hitmarkers are ' + (state.hitmarker ? 'enabled' : 'disabled') + '\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Info messages are ' + (state.debug > 0 ? 'enabled' : 'disabled') + '\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\n-----------------------------------------------------------------------------------\n');
+			
+				if (!isConsoleCommand) {
+					g_PlayerFuncs.SayText(plr, 'Lag compensation is ' + (state.enabled ? 'enabled' : 'disabled') + mode + '\n');
+					g_PlayerFuncs.SayText(plr, 'Say ".lagc [on/off/toggle]" to enable or disable lag compensation.\n');
+					g_PlayerFuncs.SayText(plr, 'Say ".lagc x" to toggle hit confirmations.\n');
+					g_PlayerFuncs.SayText(plr, 'Type ".lagc" in console for more commands/info\n');
+				}
+			}
 			return true;
 		}
 	}
@@ -643,10 +817,17 @@ HookReturnCode ClientSay( SayParameters@ pParams )
 {
 	CBasePlayer@ plr = pParams.GetPlayer();
 	const CCommand@ args = pParams.GetArguments();	
-	if (doCommand(plr, args))
+	if (doCommand(plr, args, false))
 	{
 		pParams.ShouldHide = true;
 		return HOOK_HANDLED;
 	}
 	return HOOK_CONTINUE;
+}
+
+CClientCommand _lagc("lagc", "Lag compensation commands", @consoleCmd );
+
+void consoleCmd( const CCommand@ args ) {
+	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
+	doCommand(plr, args, true);
 }
