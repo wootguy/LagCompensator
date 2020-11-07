@@ -4,12 +4,11 @@
 // - auto-enable for high pings?
 // - average ping times?
 // - gauss explosion broken?
-// - minigunner broken
 // - no damage when disabled sometimes (revolver, secondary fire shotgun).
-// - knockback not working at all
 
 // can't reproduce:
 // - extreme lag barnacle weapon op_blackmesa4
+// - knockback not working for minigun in megagman map (maybe damage was 0?)
 
 // minor todo:
 // - compensate in PvP
@@ -33,6 +32,7 @@
 const float MAX_LAG_COMPENSATION_TIME = 2.0f; // 2 seconds
 const float BULLET_RANGE = 8192;
 const string CUSTOM_DAMAGE_KEY = "$f_lagc_dmg"; // used to restore custom damage values on lagged bullets
+const string WEAPON_STATE_KEY = "$i_lagc_state"; // weapon compensation state
 string hitmarker_spr = "sprites/misc/mlg.spr";
 string hitmarker_snd = "misc/hitmarker.mp3";
 
@@ -51,6 +51,7 @@ array<float> last_shoot; // needed to calculate recoil. punchangle is not update
 array<float> gauss_start_charge;
 dictionary g_supported_weapons;
 dictionary g_monster_blacklist; // don't track these - waste of time
+dictionary g_556_guns; // these need special treatment since skill values are shared with monsters
 
 dictionary g_player_states;
 int g_state_count = 0;
@@ -75,7 +76,7 @@ void PluginInit()
 	
 	if (g_Engine.time > 4) { // plugin reloaded mid-map?
 		check_classic_mode();
-		reload_skill_settings();
+		reload_skill_files();
 		late_init();
 	}
 }
@@ -91,6 +92,11 @@ void init() {
 		last_shoot[i] = 0;
 		gauss_start_charge[0] = -1;
 	}
+	
+	g_556_guns.clear();
+	g_556_guns["weapon_m16"] = true;
+	g_556_guns["weapon_m249"] = true;
+	g_556_guns["weapon_minigun"] = true;
 	
 	g_supported_weapons.clear();
 	g_supported_weapons["weapon_9mmhandgun"] = true;
@@ -139,7 +145,7 @@ void MapActivate() {
 	g_Scheduler.SetTimeout("late_init", 2);
 }
 
-void reload_skill_settings() {
+void reload_skill_files() {
 	string map_skill_file = "" + g_Engine.mapname + "_skl.cfg";
 	g_EngineFuncs.ServerCommand("exec skill.cfg; exec " + map_skill_file + ";\n");
 	g_EngineFuncs.ServerExecute();
@@ -152,7 +158,15 @@ void reset_weapon_damages() {
 		if (ent !is null)
 		{
 			CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(ent);
-			wep.m_flCustomDmg = 0;
+			
+			KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
+			CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+			
+			if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
+				wep.m_flCustomDmg = pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ).GetFloat();
+			}
+			
+			pCustom.SetKeyvalue(WEAPON_STATE_KEY, WEP_NOT_INITIALIZED);
 		}
 	} while(ent !is null);
 }
@@ -192,7 +206,7 @@ void disable_default_damages() {
 	g_EngineFuncs.CVarSetFloat("sk_plr_uzi", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_9mm_bullet", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_9mmAR_bullet", 0);
-	g_EngineFuncs.CVarSetFloat("sk_556_bullet", 0); // can't touch this one. Monsters use it, too.
+	//g_EngineFuncs.CVarSetFloat("sk_556_bullet", 0); // can't touch this one. Monsters use it, too.
 	g_EngineFuncs.CVarSetFloat("sk_plr_762_bullet", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_357_bullet", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_buckshot", 0);
@@ -207,13 +221,27 @@ void enable_default_damages() {
 	g_EngineFuncs.CVarSetFloat("sk_plr_uzi", g_bullet_damage[BULLET_UZI]);
 	g_EngineFuncs.CVarSetFloat("sk_plr_9mm_bullet", g_bullet_damage[BULLET_PLAYER_9MM]);
 	g_EngineFuncs.CVarSetFloat("sk_plr_9mmAR_bullet", g_bullet_damage[BULLET_PLAYER_MP5]);
-	g_EngineFuncs.CVarSetFloat("sk_556_bullet", g_bullet_damage[BULLET_PLAYER_SAW]); // can't touch this one. Monsters use it, too.
+	//g_EngineFuncs.CVarSetFloat("sk_556_bullet", g_bullet_damage[BULLET_PLAYER_SAW]); // can't touch this one. Monsters use it, too.
 	g_EngineFuncs.CVarSetFloat("sk_plr_762_bullet", g_bullet_damage[BULLET_PLAYER_SNIPER]);
 	g_EngineFuncs.CVarSetFloat("sk_plr_357_bullet", g_bullet_damage[BULLET_PLAYER_357]);
 	g_EngineFuncs.CVarSetFloat("sk_plr_buckshot", g_bullet_damage[BULLET_PLAYER_BUCKSHOT]);
 	g_EngineFuncs.CVarSetFloat("sk_plr_gauss", g_bullet_damage[BULLET_GAUSS]);
 	g_EngineFuncs.CVarSetFloat("sk_plr_secondarygauss", g_bullet_damage[BULLET_GAUSS2]);
 	println("Re-enabled default bullet damages");
+}
+
+enum WeaponCompensationStates {
+	// default mode for all weapons. The plugin needs to modify the gun so it works properly
+	WEP_NOT_INITIALIZED,
+	
+	// weapon has been modified so that only this plugin can deal damage.
+	// That means saving any map-specific damage to a separate keyvalue, then
+	// setting the custom damage to 0, so that it uses the skill setting (which will also be 0, unless 556 ammo is used)
+	WEP_COMPENSATE_ON,
+	
+	// weapon has a custom damage set so that the default sven damage logic works.
+	// A custom damage is needed because the skill settings will all be set to 0.
+	WEP_COMPENSATE_OFF
 }
 
 enum AdjustModes {
@@ -231,7 +259,7 @@ class PlayerState
 	bool enabled = true;
 	int compensation = 0;
 	int adjustMode = 0;
-	int debug = 0;
+	int debug = 1;
 	bool hitmarker = true;
 }
 
@@ -353,7 +381,7 @@ void refresh_cvars() {
 	
 	bool anyChanges = false;
 	for (int i = 0; i < 10; i++) {
-		if (changed_damages[i] != 0) {
+		if (changed_damages[i] != 0 && changed_damages[i] != g_bullet_damage[i]) {
 			g_bullet_damage[i] = changed_damages[i];
 			anyChanges = true;
 		}
@@ -388,25 +416,33 @@ void refresh_player_states() {
 				last_minigun_clips[i] = plr.m_rgAmmo(wep.m_iPrimaryAmmoType);
 			}
 			
-			PlayerState@ state = getPlayerState(plr);			
+			PlayerState@ state = getPlayerState(plr);
+			int weaponState = WEP_NOT_INITIALIZED;
 			
-			if (state.enabled && wep.m_flCustomDmg != 0) {
-				bool usesDefaultDamage = wep.m_flCustomDmg < 1.0f;
-				
-				if (!usesDefaultDamage) {
-					// save current custom damage, so it can be used later
-					KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
-					CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
-					pCustom.SetKeyvalue(CUSTOM_DAMAGE_KEY, wep.m_flCustomDmg);
-					//println("Saved custom damage");
-				}
-				
+			KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
+			CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+			if (pCustom.HasKeyvalue(WEAPON_STATE_KEY)) {
+				weaponState = pCustom.GetKeyvalue( WEAPON_STATE_KEY ).GetInteger();
+			}
+			
+			// save current custom damage, if one was set by the mapper (or a cheat plugin)
+			// because the plugin is about to overwrite that key
+			if (weaponState == WEP_NOT_INITIALIZED && wep.m_flCustomDmg >= 1.0f) {
+				pCustom.SetKeyvalue(CUSTOM_DAMAGE_KEY, wep.m_flCustomDmg);
+			}
+			
+			if (state.enabled && weaponState != WEP_COMPENSATE_ON) {
 				// prevent sven code from doing damage with this weapon (0 = use cvar, and cvars are set to do 0 damage)
-				wep.m_flCustomDmg = 0;
-			} else if (!state.enabled && wep.m_flCustomDmg == 0) {
-				KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
-				CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+				// One exception: 556 guns can't use the cvar because that would prevent monsters from doing damage (hwgrunt)
+				// "1" is the minimum damage that can be set for m_flCustomDmg. So, these guns will be more powerful when double-hitting.
+				bool uses556Ammo = g_556_guns.exists(wep.pev.classname);
+				wep.m_flCustomDmg = uses556Ammo ? 1.0f : 0.0f;
+				
+				pCustom.SetKeyvalue(WEAPON_STATE_KEY, WEP_COMPENSATE_ON);
+				
+			} else if (!state.enabled && weaponState != WEP_COMPENSATE_OFF) {				
 				if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
+					// restore the mapper's custom damage
 					CustomKeyvalue dmgKey( pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ) );
 					wep.m_flCustomDmg = dmgKey.GetFloat();
 					//println("Restored custom damage " + wep.m_flCustomDmg);
@@ -414,6 +450,8 @@ void refresh_player_states() {
 					// restore cvar damage
 					wep.m_flCustomDmg = get_bullet_damage(wep.pev.classname);
 				}
+				
+				pCustom.SetKeyvalue(WEAPON_STATE_KEY, WEP_COMPENSATE_OFF);
 			}
 		}
 	}
@@ -479,12 +517,76 @@ float get_bullet_damage(string cname) {
 	return 0; // whatever the cvar default is
 }
 
-array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire) {
+string get_bullet_skill_setting(int bulletType) {
+	switch(bulletType) {
+		case BULLET_UZI: return "sk_plr_uzi";
+		case BULLET_PLAYER_9MM: return "sk_plr_9mm_bullet";
+		case BULLET_PLAYER_MP5: return "sk_plr_9mmAR_bullet";
+		case BULLET_PLAYER_SAW: return "sk_556_bullet";
+		case BULLET_PLAYER_SNIPER: return "sk_plr_762_bullet";
+		case BULLET_PLAYER_357: return "sk_plr_357_bullet";
+		case BULLET_PLAYER_BUCKSHOT: return "sk_plr_buckshot";
+		case BULLET_GAUSS: return "sk_plr_gauss";
+		case BULLET_GAUSS2: return "sk_plr_secondarygauss";
+		default: break;
+	}
+	
+	println("Unsupported bullet type: " + bulletType);
+	return "";
+}
+
+int get_bullet_type(string cname) {
+	if (cname == "weapon_9mmhandgun") {
+		return BULLET_PLAYER_9MM;
+	}
+	else if (cname == "weapon_357") {
+		return BULLET_PLAYER_357;
+	}
+	else if (cname == "weapon_eagle") {
+		return BULLET_PLAYER_357;
+	}
+	else if (cname == "weapon_uzi") {
+		return BULLET_PLAYER_MP5;
+	}
+	else if (cname == "weapon_9mmAR") {
+		return BULLET_PLAYER_MP5;
+	}
+	else if (cname == "weapon_shotgun") {
+		return BULLET_PLAYER_BUCKSHOT;
+	}
+	else if (cname == "weapon_gauss") {
+		return BULLET_GAUSS;
+	}
+	else if (cname == "weapon_sniperrifle") {
+		return BULLET_PLAYER_SNIPER;
+	}
+	else if (cname == "weapon_m249") {
+		return BULLET_PLAYER_SAW;
+	}
+	else if (cname == "weapon_m16") {
+		return BULLET_PLAYER_SAW;
+	}
+	else if (cname == "weapon_minigun") {
+		return BULLET_PLAYER_SAW;
+	}
+	
+	println("Unsupported weapon for get_bullet_type: " + cname);
+	return -1;
+}
+
+array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, bool debug=false) {
 	string cname = wep.pev.classname;
 	
 	float damage = 0;
 	Vector spread = Vector(0,0,0);
 	int bulletCount = 1;
+	
+	// 556 is nerfed by 0.5 damage points because bullets hit twice when an npc's rewind position matches its current position.
+	// The gun will do 1 point of extra damage when that happens. Subtracting 0.5 points means the gun will
+	// be slightly stronger when shooting stationary targets, and slightly weaker for moving targets.
+	// This had to be done because custom damage any weapon has to be at least 1, and the skill setting can't be 0
+	// because it's shared with monsters (hwgrunt would do no damage if set to 0).
+	const float nerf_556 = 0.5f;
 	
 	if (cname == "weapon_9mmhandgun") {
 		damage = g_bullet_damage[BULLET_PLAYER_9MM];
@@ -533,15 +635,15 @@ array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSe
 		spread = wep.m_fInZoom ? Vector(0,0,0) : VECTOR_CONE_6DEGREES;
 	}
 	else if (cname == "weapon_m249") {
-		damage = g_bullet_damage[BULLET_PLAYER_SAW];
+		damage = g_bullet_damage[BULLET_PLAYER_SAW] - nerf_556;
 		spread = VECTOR_CONE_4DEGREES;
 	}
 	else if (cname == "weapon_m16") {
-		damage = g_bullet_damage[BULLET_PLAYER_SAW];
+		damage = g_bullet_damage[BULLET_PLAYER_SAW] - nerf_556;
 		spread = VECTOR_CONE_4DEGREES;
 	}
 	else if (cname == "weapon_minigun") {
-		damage = g_bullet_damage[BULLET_PLAYER_SAW];
+		damage = g_bullet_damage[BULLET_PLAYER_SAW] - nerf_556;
 		spread = VECTOR_CONE_4DEGREES;
 	}
 	else {
@@ -554,8 +656,11 @@ array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSe
 	KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
 	CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
 	if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
-		CustomKeyvalue dmgKey( pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ) );
-		damage = dmgKey.GetFloat();
+		damage = pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ).GetFloat();
+	}
+	
+	if (debug) {
+		debug_bullet_damage(plr, wep, damage, true);
 	}
 	
 	array<LagBullet> bullets;
@@ -564,6 +669,44 @@ array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSe
 	}
 	
 	return bullets;
+}
+
+void debug_bullet_damage(CBasePlayer@ plr, CBasePlayerWeapon@ wep, float plugin_dmg, bool is_comp) {
+	int bulletType = get_bullet_type(wep.pev.classname);
+
+	KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
+	CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+
+	float custom_damage = wep.m_flCustomDmg;
+	int state = WEP_NOT_INITIALIZED;
+	if (pCustom.HasKeyvalue(WEAPON_STATE_KEY)) {
+		state = pCustom.GetKeyvalue(WEAPON_STATE_KEY).GetInteger();
+	}
+
+	string dmg = "m_flCustomDmg = " + custom_damage;
+	if (is_comp) {
+		dmg += ", plugin = " + plugin_dmg;
+	}
+	
+	if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
+		float key_damage = pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ).GetFloat();
+		dmg += ", " + CUSTOM_DAMAGE_KEY + " = " + key_damage;
+	}
+	if (custom_damage < 1.0f) {
+		string skill_setting = get_bullet_skill_setting(int(bulletType));
+		float skillDmg = g_EngineFuncs.CVarGetFloat(skill_setting);
+	
+		dmg += ", " + skill_setting + " = " + skillDmg;
+	}
+	if (state == WEP_NOT_INITIALIZED) {
+		dmg += " (NOT INIT)";
+	} else if (state == WEP_COMPENSATE_ON) {
+		dmg += " (COMP ON)";
+	} else if (state == WEP_COMPENSATE_OFF) {
+		dmg += " (COMP OFF)";
+	}
+	
+	g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "" + wep.pev.classname + ": "  + dmg + "\n");
 }
 
 Vector getEstimatedRecoil(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire) {
@@ -692,7 +835,7 @@ int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		}
 	}
 	
-	if (state.debug > 0) {
+	if (state.debug > 0 && laggyEnts.size() > 0) {
 		string shift = "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
 		float scale = (1.0f / MAX_LAG_COMPENSATION_TIME);
 		int rate = int((g_state_count / laggyEnts.size())*scale);
@@ -806,7 +949,7 @@ void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, 
 		g_Scheduler.SetTimeout("delay_compensate", 0.075f, EHandle(plr), EHandle(wep), isSecondaryFire, burst_round+1);
 	}
 	
-	array<LagBullet> lagBullets = get_bullets(plr, wep, isSecondaryFire);
+	array<LagBullet> lagBullets = get_bullets(plr, wep, isSecondaryFire, state.debug > 0);
 	
 	int clip = wep.m_iClip;
 	if (wep.pev.classname == "weapon_minigun") {
@@ -940,6 +1083,8 @@ void debug_stats(CBasePlayer@ debugger) {
 			} else if (state.adjustMode == ADJUST_SUB) {
 				mode = "ping -" + state.compensation + "ms";
 			}
+			
+			mode += ", hitmarks " + (state.hitmarker ? "ON" : "OFF") + ", debug " + state.debug;
 				
 			g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, '    ' + plr.pev.netname + ": " + mode + "\n");
 		}
@@ -992,7 +1137,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				}
 				else if (arg == "reload" && isAdmin) {
 					g_PlayerFuncs.SayTextAll(plr, "Reloaded skill settings\n");
-					reload_skill_settings();
+					reload_skill_files();
 					late_init();
 					reload_ents();
 					reset_weapon_damages();
@@ -1014,21 +1159,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				else if (arg == "test" && isAdmin) {
 					CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
 					if (wep !is null) {
-						KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
-						CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
-						float customDmg = 123456;
-						if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
-							CustomKeyvalue dmgKey( pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ) );
-							customDmg = dmgKey.GetFloat();
-						}
-					
-						g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "\nCustom damage: " + wep.m_flCustomDmg + ", " + customDmg + "\n");
-						
-						g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nBULLET DAMAGES:\n');
-						for (uint i = 0; i < g_bullet_damage.size(); i++) {
-							g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "   " + i + " = " + g_bullet_damage[i] + "\n");
-						}
-						g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "\n");
+						debug_bullet_damage(plr, wep, 0, false);
 					}
 				}
 				else if (arg == "on") {
