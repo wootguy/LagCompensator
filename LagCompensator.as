@@ -4,6 +4,12 @@
 // - auto-enable for high pings?
 // - average ping times?
 // - gauss explosion broken?
+// - minigunner broken
+// - no damage when disabled sometimes (revolver, secondary fire shotgun).
+// - knockback not working at all
+
+// can't reproduce:
+// - extreme lag barnacle weapon op_blackmesa4
 
 // minor todo:
 // - compensate in PvP
@@ -33,7 +39,7 @@ string hitmarker_snd = "misc/hitmarker.mp3";
 bool shotgun_doubleshot_mode = false;
 bool pistol_silencer_mode = false;
 bool is_classic_mode = false;
-bool g_enabled = false;
+bool g_enabled = true;
 float g_update_delay = 0.05f; // time between monster state updates
 CScheduledFunction@ update_interval = null;
 
@@ -44,6 +50,7 @@ array<int> last_minigun_clips; // needed to know if a player shot or not. Second
 array<float> last_shoot; // needed to calculate recoil. punchangle is not updated when shooting weapons.
 array<float> gauss_start_charge;
 dictionary g_supported_weapons;
+dictionary g_monster_blacklist; // don't track these - waste of time
 
 dictionary g_player_states;
 int g_state_count = 0;
@@ -62,16 +69,15 @@ void PluginInit()
 	@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
 	g_Scheduler.SetInterval("refresh_player_states", 1.0f, -1);
 	g_Scheduler.SetInterval("refresh_cvars", 5.0f, -1);
-	g_Scheduler.SetInterval("cleanup_ents", 10.0f, -1);
+	g_Scheduler.SetInterval("cleanup_ents", 5.0f, -1);
 	
 	init();
 	
 	if (g_Engine.time > 4) { // plugin reloaded mid-map?
 		check_classic_mode();
-		late_init();
 		reload_skill_settings();
+		late_init();
 	}
-	reload_ents();
 }
 
 void init() {
@@ -98,6 +104,26 @@ void init() {
 	g_supported_weapons["weapon_m249"] = true;
 	g_supported_weapons["weapon_m16"] = true;
 	g_supported_weapons["weapon_minigun"] = true;
+	
+	g_monster_blacklist.clear();
+	g_monster_blacklist["monster_barney_dead"] = true;
+	g_monster_blacklist["monster_cockroach"] = true;
+	g_monster_blacklist["monster_furniture"] = true;
+	g_monster_blacklist["monster_handgrenade"] = true;
+	g_monster_blacklist["monster_hevsuit_dead"] = true;
+	g_monster_blacklist["monster_hgrunt_dead"] = true;
+	g_monster_blacklist["monster_human_grunt_ally_dead"] = true;
+	g_monster_blacklist["monster_leech"] = true;
+	g_monster_blacklist["monster_otis_dead"] = true;
+	g_monster_blacklist["monster_satchel"] = true;
+	g_monster_blacklist["monster_scientist_dead"] = true;
+	g_monster_blacklist["monster_sitting_scientist"] = true;
+	g_monster_blacklist["monster_tripmine"] = true;
+	
+	// disabling turrets would make defendthefort boss harder
+	//g_monster_blacklist["monster_sentry"] = true;
+	//g_monster_blacklist["monster_miniturret"] = true;
+	//g_monster_blacklist["monster_turret"] = true;
 }
 
 void MapInit() {
@@ -117,6 +143,18 @@ void reload_skill_settings() {
 	string map_skill_file = "" + g_Engine.mapname + "_skl.cfg";
 	g_EngineFuncs.ServerCommand("exec skill.cfg; exec " + map_skill_file + ";\n");
 	g_EngineFuncs.ServerExecute();
+}
+
+void reset_weapon_damages() {
+	CBaseEntity@ ent;
+	do {
+		@ent = g_EntityFuncs.FindEntityByClassname(ent, "weapon_*");
+		if (ent !is null)
+		{
+			CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(ent);
+			wep.m_flCustomDmg = 0;
+		}
+	} while(ent !is null);
 }
 
 void check_classic_mode() {
@@ -144,6 +182,8 @@ void late_init() {
 	
 	if (g_enabled)
 		disable_default_damages();
+		
+	reload_ents();
 }
 
 void disable_default_damages() {
@@ -152,12 +192,28 @@ void disable_default_damages() {
 	g_EngineFuncs.CVarSetFloat("sk_plr_uzi", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_9mm_bullet", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_9mmAR_bullet", 0);
-	g_EngineFuncs.CVarSetFloat("sk_556_bullet", 0);
+	g_EngineFuncs.CVarSetFloat("sk_556_bullet", 0); // can't touch this one. Monsters use it, too.
 	g_EngineFuncs.CVarSetFloat("sk_plr_762_bullet", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_357_bullet", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_buckshot", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_gauss", 0);
 	g_EngineFuncs.CVarSetFloat("sk_plr_secondarygauss", 0);
+	println("Disabled default bullet damages");
+}
+
+void enable_default_damages() {
+	// all damage will be done by this plugin or with the custom weapon damage keyvalue
+	// otherwise enemies can be hit twice by the same bullet (sven bullet + plugin bullet)
+	g_EngineFuncs.CVarSetFloat("sk_plr_uzi", g_bullet_damage[BULLET_UZI]);
+	g_EngineFuncs.CVarSetFloat("sk_plr_9mm_bullet", g_bullet_damage[BULLET_PLAYER_9MM]);
+	g_EngineFuncs.CVarSetFloat("sk_plr_9mmAR_bullet", g_bullet_damage[BULLET_PLAYER_MP5]);
+	g_EngineFuncs.CVarSetFloat("sk_556_bullet", g_bullet_damage[BULLET_PLAYER_SAW]); // can't touch this one. Monsters use it, too.
+	g_EngineFuncs.CVarSetFloat("sk_plr_762_bullet", g_bullet_damage[BULLET_PLAYER_SNIPER]);
+	g_EngineFuncs.CVarSetFloat("sk_plr_357_bullet", g_bullet_damage[BULLET_PLAYER_357]);
+	g_EngineFuncs.CVarSetFloat("sk_plr_buckshot", g_bullet_damage[BULLET_PLAYER_BUCKSHOT]);
+	g_EngineFuncs.CVarSetFloat("sk_plr_gauss", g_bullet_damage[BULLET_GAUSS]);
+	g_EngineFuncs.CVarSetFloat("sk_plr_secondarygauss", g_bullet_damage[BULLET_GAUSS2]);
+	println("Re-enabled default bullet damages");
 }
 
 enum AdjustModes {
@@ -239,6 +295,13 @@ class LagEnt {
 	}
 }
 
+void add_lag_comp_ent(CBaseEntity@ ent) {
+	if (g_monster_blacklist.exists(ent.pev.classname)) {
+		return;
+	}
+	laggyEnts.insertLast(LagEnt(ent));
+}
+
 void reload_ents() {
 	laggyEnts.resize(0);
 
@@ -247,7 +310,7 @@ void reload_ents() {
 		@ent = g_EntityFuncs.FindEntityByClassname(ent, "monster_*");
 		if (ent !is null)
 		{
-			laggyEnts.insertLast(LagEnt(ent));
+			add_lag_comp_ent(ent);
 		}
 	} while(ent !is null);
 }
@@ -270,7 +333,7 @@ const int BULLET_GAUSS = 8;
 const int BULLET_GAUSS2 = 9;
 
 void refresh_cvars() {
-	if (!g_enabled) {
+	if (!g_enabled or g_Engine.time < 4) {
 		return;
 	}
 	
@@ -278,23 +341,26 @@ void refresh_cvars() {
 	array<float> changed_damages;
 	changed_damages.resize(10);
 	
-	changed_damages[BULLET_UZI] = g_EngineFuncs.CVarGetFloat("sk_plr_uzi");
-	changed_damages[BULLET_PLAYER_9MM] = g_EngineFuncs.CVarGetFloat("sk_plr_9mm_bullet");
-	changed_damages[BULLET_PLAYER_MP5] = g_EngineFuncs.CVarGetFloat("sk_plr_9mmAR_bullet");
-	changed_damages[BULLET_PLAYER_SAW] = g_EngineFuncs.CVarGetFloat("sk_556_bullet");
-	changed_damages[BULLET_PLAYER_SNIPER] = g_EngineFuncs.CVarGetFloat("sk_plr_762_bullet");
-	changed_damages[BULLET_PLAYER_357] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");
-	changed_damages[BULLET_PLAYER_BUCKSHOT] = g_EngineFuncs.CVarGetFloat("sk_plr_buckshot");
-	changed_damages[BULLET_GAUSS] = g_EngineFuncs.CVarGetFloat("sk_plr_gauss");
-	changed_damages[BULLET_GAUSS2] = g_EngineFuncs.CVarGetFloat("sk_plr_secondarygauss");
+	changed_damages[BULLET_UZI] = g_EngineFuncs.CVarGetFloat("sk_plr_uzi"); 					// 0
+	changed_damages[BULLET_PLAYER_9MM] = g_EngineFuncs.CVarGetFloat("sk_plr_9mm_bullet"); 		// 1
+	changed_damages[BULLET_PLAYER_MP5] = g_EngineFuncs.CVarGetFloat("sk_plr_9mmAR_bullet");  	// 2
+	changed_damages[BULLET_PLAYER_SAW] = g_EngineFuncs.CVarGetFloat("sk_556_bullet");			// 3
+	changed_damages[BULLET_PLAYER_SNIPER] = g_EngineFuncs.CVarGetFloat("sk_plr_762_bullet");	// 4
+	changed_damages[BULLET_PLAYER_357] = g_EngineFuncs.CVarGetFloat("sk_plr_357_bullet");		// 5
+	changed_damages[BULLET_PLAYER_BUCKSHOT] = g_EngineFuncs.CVarGetFloat("sk_plr_buckshot");	// 7
+	changed_damages[BULLET_GAUSS] = g_EngineFuncs.CVarGetFloat("sk_plr_gauss");					// 8
+	changed_damages[BULLET_GAUSS2] = g_EngineFuncs.CVarGetFloat("sk_plr_secondarygauss");		// 9
 	
+	bool anyChanges = false;
 	for (int i = 0; i < 10; i++) {
 		if (changed_damages[i] != 0) {
 			g_bullet_damage[i] = changed_damages[i];
+			anyChanges = true;
 		}
 	}
 	
-	disable_default_damages();
+	if (anyChanges)
+		disable_default_damages();
 	
 	// these can also change mid-map
 	shotgun_doubleshot_mode = g_EngineFuncs.CVarGetFloat("weaponmode_shotgun") == 1;
@@ -819,9 +885,9 @@ HookReturnCode WeaponSecondaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep)
 
 HookReturnCode EntityCreated(CBaseEntity@ ent)
 {
-	if (g_enabled && ent.IsMonster() && ent.pev.classname != "cycler") {
+	if (g_enabled && string(ent.pev.classname).Find("monster_") == 0) {
 		//println("CREATED " + ent.pev.classname);
-		laggyEnts.insertLast(LagEnt(ent));
+		add_lag_comp_ent(ent);
 	}
 	return HOOK_CONTINUE;
 }
@@ -915,11 +981,13 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				}
 				else if (arg == "pause" && isAdmin) {
 					g_enabled = false;
+					enable_default_damages();
 					g_PlayerFuncs.SayTextAll(plr, "Lag compensation plugin disabled.\n");
 				}
 				else if (arg == "resume" && isAdmin) {
 					g_enabled = true;
 					reload_ents();
+					disable_default_damages();
 					g_PlayerFuncs.SayTextAll(plr, "Lag compensation plugin enabled. Say '.lagc' for help.\n");
 				}
 				else if (arg == "reload" && isAdmin) {
@@ -927,6 +995,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 					reload_skill_settings();
 					late_init();
 					reload_ents();
+					reset_weapon_damages();
 				}
 				else if (arg == "stats") {
 					debug_stats(plr);
@@ -940,6 +1009,26 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 						g_Scheduler.RemoveTimer(update_interval);
 						@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
 						g_PlayerFuncs.SayText(plr, "Lag compensation rate set to " + g_update_delay + "\n");
+					}
+				}
+				else if (arg == "test" && isAdmin) {
+					CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+					if (wep !is null) {
+						KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
+						CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
+						float customDmg = 123456;
+						if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
+							CustomKeyvalue dmgKey( pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ) );
+							customDmg = dmgKey.GetFloat();
+						}
+					
+						g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "\nCustom damage: " + wep.m_flCustomDmg + ", " + customDmg + "\n");
+						
+						g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nBULLET DAMAGES:\n');
+						for (uint i = 0; i < g_bullet_damage.size(); i++) {
+							g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "   " + i + " = " + g_bullet_damage[i] + "\n");
+						}
+						g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "\n");
 					}
 				}
 				else if (arg == "on") {
@@ -960,7 +1049,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 					g_PlayerFuncs.SayText(plr, "Lag compensation " + (state.enabled ? "enabled" : "disabled") + "\n");
 				}
 				else if (arg == "auto") {
-					state.enabled = false;
+					state.enabled = true;
 					state.compensation = 0;
 					g_PlayerFuncs.SayText(plr, "Lag compensation set to auto\n");
 				} 
@@ -984,6 +1073,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 					
 					state.compensation = amt;
 					state.adjustMode = adjustMode;
+					state.enabled = true;
 					
 					if (adjustMode == ADJUST_NONE) {
 						g_PlayerFuncs.SayText(plr, "Lag compensation set to " + state.compensation + "ms\n");
