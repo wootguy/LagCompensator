@@ -42,6 +42,9 @@ bool is_classic_mode = false;
 bool g_enabled = true;
 float g_update_delay = 0.05f; // time between monster state updates
 CScheduledFunction@ update_interval = null;
+CScheduledFunction@ player_state_interval = null;
+CScheduledFunction@ cvar_interval = null;
+CScheduledFunction@ cleanup_interval = null;
 
 array<LagEnt> laggyEnts;
 array<float> g_bullet_damage;
@@ -66,32 +69,12 @@ void PluginInit()
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponSecondaryAttack, @WeaponSecondaryAttack );
 	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerPreThink, @PlayerPreThink );
+	g_Hooks.RegisterHook( Hooks::Game::MapChange, @MapChange );
 	
-	@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
-	g_Scheduler.SetInterval("refresh_player_states", 1.0f, -1);
-	g_Scheduler.SetInterval("refresh_cvars", 5.0f, -1);
-	g_Scheduler.SetInterval("cleanup_ents", 5.0f, -1);
-	
-	init();
-	
-	if (g_Engine.time > 4) { // plugin reloaded mid-map?
-		check_classic_mode();
-		reload_skill_files();
-		late_init();
-	}
-}
-
-void init() {
 	last_shotgun_clips.resize(33);
 	last_shoot.resize(33);
 	last_minigun_clips.resize(33);
 	gauss_start_charge.resize(33);
-	for (int i = 0; i < 33; i++) {
-		last_shotgun_clips[i] = 8;
-		last_minigun_clips[i] = 0;
-		last_shoot[i] = 0;
-		gauss_start_charge[0] = -1;
-	}
 	
 	g_556_guns.clear();
 	g_556_guns["weapon_m16"] = true;
@@ -130,19 +113,56 @@ void init() {
 	//g_monster_blacklist["monster_sentry"] = true;
 	//g_monster_blacklist["monster_miniturret"] = true;
 	//g_monster_blacklist["monster_turret"] = true;
+	
+	if (g_Engine.time > 4) { // plugin reloaded mid-map?
+		reload_skill_files();
+		late_init();
+	}
+}
+
+void start_polling() {
+	println("lagc polling started");
+	@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
+	@cvar_interval = g_Scheduler.SetInterval("refresh_cvars", 5.0f, -1);
+	@cleanup_interval = g_Scheduler.SetInterval("cleanup_ents", 5.0f, -1);
+	
+	// interval must be faster than any weapon can deploy
+	@player_state_interval = g_Scheduler.SetInterval("refresh_player_states", 0.5f, -1);
+}
+
+void stop_polling() {
+	println("lagc polling stopped");
+	g_Scheduler.RemoveTimer(update_interval);
+	g_Scheduler.RemoveTimer(player_state_interval);
+	g_Scheduler.RemoveTimer(cvar_interval);
+	g_Scheduler.RemoveTimer(cleanup_interval);
+	@update_interval = null;
+	@player_state_interval = null;
+	@cvar_interval = null;
+	@cleanup_interval = null;
 }
 
 void MapInit() {
-	init();
-	
 	g_Game.PrecacheModel(hitmarker_spr);
 	g_SoundSystem.PrecacheSound(hitmarker_snd);
 	g_Game.PrecacheGeneric("sound/" + hitmarker_snd);
 }
 
-void MapActivate() {
-	check_classic_mode();
-	g_Scheduler.SetTimeout("late_init", 2);
+void MapActivate() {	
+	for (int i = 0; i < 33; i++) {
+		last_shotgun_clips[i] = 8;
+		last_minigun_clips[i] = 500;
+		last_shoot[i] = 0;
+		gauss_start_charge[0] = -1;
+	}
+	
+	late_init();
+}
+
+HookReturnCode MapChange()
+{
+	stop_polling();
+	return HOOK_CONTINUE;
 }
 
 void reload_skill_files() {
@@ -181,6 +201,8 @@ void check_classic_mode() {
 }
 
 void late_init() {
+	check_classic_mode();
+	
 	g_bullet_damage.resize(0);
 	g_bullet_damage.resize(10);
 	
@@ -198,6 +220,7 @@ void late_init() {
 		disable_default_damages();
 		
 	reload_ents();
+	start_polling();
 }
 
 void disable_default_damages() {
@@ -256,10 +279,10 @@ class PlayerState
 	// player handles and cause weird bugs or break states entirely. Check if disconnect is called
 	// if player leaves during level change.
 
-	bool enabled = true;
+	bool enabled = false;
 	int compensation = 0;
 	int adjustMode = 0;
-	int debug = 1;
+	int debug = 0;
 	bool hitmarker = true;
 }
 
@@ -361,7 +384,7 @@ const int BULLET_GAUSS = 8;
 const int BULLET_GAUSS2 = 9;
 
 void refresh_cvars() {
-	if (!g_enabled or g_Engine.time < 4) {
+	if (!g_enabled or g_Engine.time < 10) {
 		return;
 	}
 	
@@ -445,9 +468,10 @@ void refresh_player_states() {
 					// restore the mapper's custom damage
 					CustomKeyvalue dmgKey( pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ) );
 					wep.m_flCustomDmg = dmgKey.GetFloat();
-					//println("Restored custom damage " + wep.m_flCustomDmg);
+					//println("Restored custom damage " + wep.pev.classname);
 				} else {
 					// restore cvar damage
+					//println("Restored cvar damage " + wep.pev.classname);
 					wep.m_flCustomDmg = get_bullet_damage(wep.pev.classname);
 				}
 				
