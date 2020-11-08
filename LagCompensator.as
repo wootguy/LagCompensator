@@ -4,7 +4,9 @@
 
 // TODO:
 // - auto-enable for high pings?
-// EVERYTHING is gibbing when disabled (undo gib after the shot possible?)
+// - EVERYTHING is gibbing when disabled (undo gib after the shot possible?)
+// - check normal shotgun spread
+// - custom weapon NO DAMAGE (pizza san)
 
 // can't reproduce:
 // - extreme lag barnacle weapon op_blackmesa4
@@ -12,7 +14,6 @@
 // minor todo:
 // - compensate moving platforms somehow?
 // - compensate moving breakable solids and/or buttons
-// - gauss reflections+explosions
 // - move blood effect closer to monster (required linking monsters to LagEnt)
 // - show monster info at rewind position
 // - performance improvements: filter visible monsters before rewind?
@@ -57,7 +58,7 @@ class PlayerState {
 	int compensation = 0;
 	int adjustMode = 0;
 	int debug = 0;
-	bool hitmarker = true;
+	bool hitmarker = false;
 }
 
 class EntState {
@@ -450,7 +451,12 @@ void shoot_compensated_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool is
 			
 				if (doBloodStream && !phit.IsMachine()) {
 					CBaseMonster@ mon = cast<CBaseMonster@>(phit);
-					g_Utility.BloodStream(tr.vecEndPos, tr.vecPlaneNormal, mon.BloodColor(), 160);
+					int bloodColor = mon.BloodColor();
+					if (bloodColor == BLOOD_COLOR_RED) {
+						// BLOOD_COLOR_RED actually means CIRCUS CLOWN CONFETTI PIZZA PARTY
+						bloodColor = 70; // THIS is red
+					}
+					g_Utility.BloodStream(tr.vecEndPos, tr.vecPlaneNormal, bloodColor, 160);
 				}
 			
 				@target = @phit;
@@ -544,9 +550,7 @@ HookReturnCode EntityCreated(CBaseEntity@ ent){
 	if (string(ent.pev.classname).Find("monster_") == 0) {
 		add_lag_comp_ent(ent);
 	}
-	else if (ent.pev.classname == "playerhornet") {
 	
-	}
 	return HOOK_CONTINUE;
 }
 
