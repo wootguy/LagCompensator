@@ -4,17 +4,14 @@
 
 // TODO:
 // - auto-enable for high pings?
-// - gauss explosion broken?
 // EVERYTHING is gibbing when disabled (undo gib after the shot possible?)
 
 // can't reproduce:
 // - extreme lag barnacle weapon op_blackmesa4
 
 // minor todo:
-// - compensate in PvP
 // - compensate moving platforms somehow?
 // - compensate moving breakable solids and/or buttons
-// - egon maybe
 // - gauss reflections+explosions
 // - move blood effect closer to monster (required linking monsters to LagEnt)
 // - show monster info at rewind position
@@ -26,8 +23,8 @@
 // - monsters bleed and react to being shot in the non-rewound position, but will take no damage
 //   - the blood effect can be disabled but has other side effects (no bleeding from projectiles or NPC bullets)
 // - skill CVars will show "0" damage for the supported weapons
-// - monsters ALWAYS gib certain monsters from mp5 when disabled
-//   - headcrab, zombie, gonome, alien grunt, alien slave, bullsquid, pit drone, voltigore, grunt, shocktrooper
+// - some weapons ALWAYS gib certain monsters when comp disabled
+// - 5.56 weapons do 0.5 more damage to stationary targets, -0.5 to moving
 
 const float MAX_LAG_COMPENSATION_TIME = 2.0f; // 2 seconds
 const string hitmarker_spr = "sprites/misc/mlg.spr";
@@ -116,6 +113,7 @@ void PluginInit()  {
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponPrimaryAttack, @WeaponPrimaryAttack );
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponSecondaryAttack, @WeaponSecondaryAttack );
 	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
+	g_Hooks.RegisterHook( Hooks::Player::ClientPutInServer, @ClientJoin );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerPreThink, @PlayerPreThink );
 	g_Hooks.RegisterHook( Hooks::Game::MapChange, @MapChange );
 	
@@ -232,6 +230,17 @@ void reload_ents() {
 			add_lag_comp_ent(ent);
 		}
 	} while(ent !is null);
+	
+	@ent = null;
+	do {
+		@ent = g_EntityFuncs.FindEntityByClassname(ent, "player");
+		if (ent !is null)
+		{
+			CBasePlayer@ plr = cast<CBasePlayer@>(ent);
+			if (plr.IsConnected())
+				add_lag_comp_ent(ent);
+		}
+	} while(ent !is null);
 }
 
 // removes deleted ents
@@ -239,9 +248,17 @@ void cleanup_ents() {
 	array<LagEnt> newLagEnts;
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
+		
 		if (mon is null) {
 			continue;
 		}
+		
+		if (mon.IsPlayer()) {
+			CBasePlayer@ plr = cast<CBasePlayer@>(mon);
+			if (!plr.IsConnected())
+				continue;
+		}
+		
 		newLagEnts.insertLast(laggyEnts[i]);
 	}
 	laggyEnts = newLagEnts;
@@ -274,15 +291,16 @@ void debug_rewind(CBaseMonster@ mon, EntState lastState) {
 	oldEnt.pev.solid = SOLID_NOT;
 	oldEnt.pev.movetype = MOVETYPE_NOCLIP;
 	
+	oldEnt.m_Activity = ACT_RELOAD;
 	oldEnt.pev.sequence = lastState.sequence;
 	oldEnt.pev.frame = lastState.frame;
+	oldEnt.ResetSequenceInfo();
 	oldEnt.pev.framerate = 0.00001f;
 	
 	g_Scheduler.SetTimeout("delay_kill", 1.0f, EHandle(oldEnt));
 }
 
 int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
-	
 	int iping;
 	
 	if (state.adjustMode == ADJUST_NONE) {
@@ -318,7 +336,7 @@ int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
-		if (mon is null) {
+		if (mon is null or mon.entindex() == plr.entindex()) {
 			continue;
 		}
 		
@@ -529,6 +547,12 @@ HookReturnCode EntityCreated(CBaseEntity@ ent){
 	else if (ent.pev.classname == "playerhornet") {
 	
 	}
+	return HOOK_CONTINUE;
+}
+
+HookReturnCode ClientJoin(CBasePlayer@ plr)
+{
+	add_lag_comp_ent(plr);
 	return HOOK_CONTINUE;
 }
 

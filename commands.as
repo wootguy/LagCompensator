@@ -89,6 +89,9 @@ void debug_stats(CBasePlayer@ debugger) {
 		LagEnt lagEnt = laggyEnts[i];
 		CBaseEntity@ ent = lagEnt.h_ent;
 		string cname = ent !is null ? string(ent.pev.classname) : "null";
+		if (ent !is null and ent.IsPlayer()) {
+			cname = ent.pev.netname;
+		}
 		
 		g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "    " + cname + ": " + lagEnt.history.size() + " states\n");
 	}
