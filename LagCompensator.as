@@ -1,4 +1,3 @@
-#include "weapons"
 #include "commands"
 #include "util"
 
@@ -20,13 +19,6 @@
 // - use BulletAccuracy method somehow
 // - custom weapon support?
 
-// unfixable(?) bugs:
-// - monsters bleed and react to being shot in the non-rewound position, but will take no damage
-//   - the blood effect can be disabled but has other side effects (no bleeding from projectiles or NPC bullets)
-// - skill CVars will show "0" damage for the supported weapons
-// - some weapons ALWAYS gib certain monsters when comp disabled
-// - 5.56 weapons do 0.5 more damage to stationary targets, -0.5 to moving
-
 const float MAX_LAG_COMPENSATION_TIME = 2.0f; // 2 seconds
 const string hitmarker_spr = "sprites/misc/mlg.spr";
 const string hitmarker_snd = "misc/hitmarker.mp3";
@@ -34,8 +26,6 @@ const string hitmarker_snd = "misc/hitmarker.mp3";
 bool g_enabled = true;
 float g_update_delay = 0.05f; // time between monster state updates
 CScheduledFunction@ update_interval = null;
-CScheduledFunction@ player_state_interval = null;
-CScheduledFunction@ cvar_interval = null;
 CScheduledFunction@ cleanup_interval = null;
 
 array<LagEnt> laggyEnts; // ents that are lag compensated
@@ -54,11 +44,11 @@ class PlayerState {
 	// player handles and cause weird bugs or break states entirely. Check if disconnect is called
 	// if player leaves during level change.
 
-	bool enabled = true;
+	bool enabled = false;
 	int compensation = 0;
 	int adjustMode = 0;
 	int debug = 0;
-	bool hitmarker = false;
+	bool hitmarker = true;
 }
 
 class EntState {
@@ -73,6 +63,7 @@ class LagEnt {
 	EHandle h_ent;
 	
 	EntState currentState; // only updated on shoots
+	EntState debugState; // used to display a debug model when a player shoots
 	array<EntState> history;
 	bool isRewound = false;
 	
@@ -116,15 +107,9 @@ void PluginInit()  {
 	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
 	g_Hooks.RegisterHook( Hooks::Player::ClientPutInServer, @ClientJoin );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerPreThink, @PlayerPreThink );
+	g_Hooks.RegisterHook( Hooks::Player::PlayerPostThink, @PlayerPostThink );
+	g_Hooks.RegisterHook( Hooks::Player::PlayerUse, @PlayerUse );
 	g_Hooks.RegisterHook( Hooks::Game::MapChange, @MapChange );
-	
-	g_bullet_damage.resize(11);
-	
-	last_shotgun_clips.resize(33);
-	last_shoot.resize(33);
-	last_minigun_clips.resize(33);
-	gauss_start_charge.resize(33);
-	egon_last_dmg.resize(33);
 	
 	g_monster_blacklist["monster_barney_dead"] = true;
 	g_monster_blacklist["monster_cockroach"] = true;
@@ -140,15 +125,12 @@ void PluginInit()  {
 	g_monster_blacklist["monster_sitting_scientist"] = true;
 	g_monster_blacklist["monster_tripmine"] = true;
 	
-	init_weapon_info();
-	
 	// disabling turrets would make defendthefort boss harder
 	//g_monster_blacklist["monster_sentry"] = true;
 	//g_monster_blacklist["monster_miniturret"] = true;
 	//g_monster_blacklist["monster_turret"] = true;
 	
 	if (g_Engine.time > 4) { // plugin reloaded mid-map?
-		reload_skill_files();
 		late_init();
 	}
 }
@@ -157,20 +139,9 @@ void MapInit() {
 	g_Game.PrecacheModel(hitmarker_spr);
 	g_SoundSystem.PrecacheSound(hitmarker_snd);
 	g_Game.PrecacheGeneric("sound/" + hitmarker_snd);
-	
-	g_EngineFuncs.ServerCommand("mp_noblastgibs 1;\n");
-	g_EngineFuncs.ServerExecute();
 }
 
 void MapActivate() {	
-	for (int i = 0; i < 33; i++) {
-		last_shotgun_clips[i] = 8;
-		last_minigun_clips[i] = 500;
-		last_shoot[i] = 0;
-		gauss_start_charge[0] = -1;
-		egon_last_dmg[0] = 0;
-	}
-	
 	late_init();
 }
 
@@ -182,33 +153,18 @@ HookReturnCode MapChange() {
 void start_polling() {
 	println("lagc polling started");
 	@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
-	@cvar_interval = g_Scheduler.SetInterval("refresh_cvars", 5.0f, -1);
 	@cleanup_interval = g_Scheduler.SetInterval("cleanup_ents", 5.0f, -1);
-	
-	// interval must be faster than any weapon can deploy
-	@player_state_interval = g_Scheduler.SetInterval("refresh_player_states", 0.5f, -1);
 }
 
 void stop_polling() {
 	println("lagc polling stopped");
 	g_Scheduler.RemoveTimer(update_interval);
-	g_Scheduler.RemoveTimer(player_state_interval);
-	g_Scheduler.RemoveTimer(cvar_interval);
 	g_Scheduler.RemoveTimer(cleanup_interval);
 	@update_interval = null;
-	@player_state_interval = null;
-	@cvar_interval = null;
 	@cleanup_interval = null;
 }
 
-void late_init() {
-	check_classic_mode();
-
-	save_cvar_values();
-	
-	if (g_enabled)
-		disable_default_damages();
-		
+void late_init() {		
 	reload_ents();
 	start_polling();
 }
@@ -376,21 +332,24 @@ int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		mon.pev.angles = t >= 0.5f ? newState.angles : oldState.angles;
 		g_EntityFuncs.SetOrigin(mon, oldState.origin + (newState.origin - oldState.origin)*t);
 		
+		mon.m_LastHitGroup = -1337; // special value to indicate the monster was NOT hit by the player
+		
 		if (state.debug > 1) {
 			EntState tweenState;
 			tweenState.origin = mon.pev.origin;
 			tweenState.sequence = mon.pev.sequence;
 			tweenState.frame = mon.pev.frame;
 			tweenState.angles = mon.pev.angles;
-		
-			debug_rewind(mon, tweenState);
+			laggyEnts[i].debugState = tweenState;
 		}
 	}
 	
 	return rewind_count;
 }
 
-void undo_rewind_monsters() {
+CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
+	CBaseEntity@ hitTarget = null;
+	
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
 		if (!laggyEnts[i].isRewound or mon is null) {
@@ -404,141 +363,43 @@ void undo_rewind_monsters() {
 		mon.pev.angles = laggyEnts[i].currentState.angles;
 		
 		laggyEnts[i].isRewound = false;
-	}
-}
-
-void delay_compensate(EHandle h_plr, EHandle h_wep, bool isSecondaryFire, int burst_round) {
-	CBasePlayer@ plr = cast<CBasePlayer@>(h_plr.GetEntity());
-	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(h_wep.GetEntity());
-	
-	if (plr !is null && wep !is null) {
-		compensate(plr, wep, isSecondaryFire, burst_round);
-	}
-}
-
-void shoot_compensated_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, PlayerState@ state, WeaponInfo@ wepInfo) {
-	Vector vecSrc = plr.GetGunPosition();
-	bool doBloodStream = wep.pev.classname == "weapon_sniperrifle";
-	bool doEgonBlast = wep.pev.classname == "weapon_egon";
-	bool isGauss = wep.pev.classname == "weapon_gauss";
-	int hits = 0;
-	CBaseEntity@ target = null;
-	
-	array<LagBullet> lagBullets = get_bullets(plr, wep, isSecondaryFire, wepInfo, state.debug > 0);
-	
-	for (uint b = 0; b < lagBullets.size(); b++) {
-		LagBullet bullet = lagBullets[b];
 		
-		if (isGauss) {
-			CBaseEntity@ hitMonster = @gauss_effects(plr, wep, bullet, isSecondaryFire);
-			if (hitMonster !is null) {
-				@target = @hitMonster;
-				hits++;
-			}
-			continue;
+		if (state.debug > 1 && didShoot) {
+			debug_rewind(mon, laggyEnts[i].debugState);
 		}
 		
-		TraceResult tr;
-		g_Utility.TraceLine( vecSrc, vecSrc + bullet.vecAim*BULLET_RANGE, dont_ignore_monsters, plr.edict(), tr );
-		
-		bool hit = false;
-		CBaseEntity@ phit = g_EntityFuncs.Instance(tr.pHit);
-		if (phit !is null) {
-			if (phit.IsMonster()) {	
-				
-				// move the impact sprite closer to the where the monster currently is
-				//tr.vecEndPos = tr.vecEndPos + (currentOrigin - lastState.origin);
-			
-				if (doBloodStream && !phit.IsMachine()) {
-					CBaseMonster@ mon = cast<CBaseMonster@>(phit);
-					int bloodColor = mon.BloodColor();
-					if (bloodColor == BLOOD_COLOR_RED) {
-						// BLOOD_COLOR_RED actually means CIRCUS CLOWN CONFETTI PIZZA PARTY
-						bloodColor = 70; // THIS is red
-					}
-					g_Utility.BloodStream(tr.vecEndPos, tr.vecPlaneNormal, bloodColor, 160);
-				}
-			
-				@target = @phit;
-				hit = true;
-				hits++;
-			}
-			
-			g_WeaponFuncs.ClearMultiDamage();
-			phit.TraceAttack(plr.pev, bullet.damage, bullet.vecAim, tr, wepInfo.dmgType);
-			g_WeaponFuncs.ApplyMultiDamage(plr.pev, plr.pev);
-			
-			if (doEgonBlast) {
-				g_WeaponFuncs.RadiusDamage( tr.vecEndPos, wep.pev, plr.pev, bullet.damage/4, 128, CLASS_NONE, DMG_ENERGYBEAM | DMG_BLAST | DMG_ALWAYSGIB );
-			}
-		}
-		
-		if (state.debug > 1) {
-			int life = 10;
-			te_beampoints(vecSrc, tr.vecEndPos, "sprites/laserbeam.spr", 0, 100, life, 2, 0, hit ? RED : GREEN);
+		if (mon.m_LastHitGroup != -1337) {
+			println("HIT? " + mon.m_LastHitGroup);
+			//hits++;
+			@hitTarget = @mon;
 		}
 	}
 	
-	if (hits > 0 && state.hitmarker) {
-		HUDSpriteParams params;
-		params.flags = HUD_SPR_MASKED | HUD_ELEM_SCR_CENTER_X | HUD_ELEM_SCR_CENTER_Y | HUD_ELEM_EFFECT_ONCE;
-		params.spritename = hitmarker_spr.SubString("sprites/".Length());
-		params.holdTime = 0.5f;
-		params.x = 0;
-		params.y = 0;
-		params.color1 = RGBA( 255, 255, 255, 255 );
-		params.color2 = RGBA(255, 255, 255, 0);
-		params.fxTime = 0.8f;
-		params.effect = HUD_EFFECT_RAMP_UP;
-		params.channel = 15;
-		g_PlayerFuncs.HudCustomSprite(plr, params);
-		
-		g_SoundSystem.PlaySound(target.edict(), CHAN_AUTO, hitmarker_snd, 0.8f, 0.0f, 0, 100, plr.entindex());
-	}
+	return hitTarget;
 }
 
-void compensate(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSecondaryFire, int burst_round=1, bool force_shoot=false) {
-	if (!g_enabled) {
-		return; // lag compensation disabled for everyon
-	}
+void show_hit_marker(CBasePlayer@ plr, CBaseEntity@ target) {
+	HUDSpriteParams params;
+	params.flags = HUD_SPR_MASKED | HUD_ELEM_SCR_CENTER_X | HUD_ELEM_SCR_CENTER_Y | HUD_ELEM_EFFECT_ONCE;
+	params.spritename = hitmarker_spr.SubString("sprites/".Length());
+	params.holdTime = 0.5f;
+	params.x = 0;
+	params.y = 0;
+	params.color1 = RGBA( 255, 255, 255, 255 );
+	params.color2 = RGBA(255, 255, 255, 0);
+	params.fxTime = 0.8f;
+	params.effect = HUD_EFFECT_RAMP_UP;
+	params.channel = 15;
+	g_PlayerFuncs.HudCustomSprite(plr, params);
 	
-	PlayerState@ state = getPlayerState(plr);
-	
-	if (!state.enabled) {
-		return; // lag compensation disabled for this player
-	}
-	
-	WeaponInfo@ wepInfo = cast<WeaponInfo@>( g_weapon_info[wep.pev.classname] );
-	
-	if (wepInfo is null) {
-		return; // unsupported gun
-	}
-	
-	if (!force_shoot && !didPlayerShoot(plr, wep, isSecondaryFire)) {
-		return; // didn't actually shoot a bullet (the hooks are not at all reliable)
-	}
-	
-	// TODO maybe: make this generic so it works for any burst-fire weapon
-	if (burst_round < 3 && wep.pev.classname == "weapon_m16") {
-		g_Scheduler.SetTimeout("delay_compensate", 0.075f, EHandle(plr), EHandle(wep), isSecondaryFire, burst_round+1);
-	}
-	
-	rewind_monsters(plr, state);
-	
-	shoot_compensated_bullets(plr, wep, isSecondaryFire, state, wepInfo);
-	
-	undo_rewind_monsters();
-	
-	last_shoot[plr.entindex()] = g_Engine.time;
+	g_SoundSystem.PlaySound(target.edict(), CHAN_AUTO, hitmarker_snd, 0.8f, 0.0f, 0, 100, plr.entindex());
 }
 
 HookReturnCode WeaponPrimaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
-	compensate(plr, wep, false);
 	return HOOK_CONTINUE;
 }
 
 HookReturnCode WeaponSecondaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
-	compensate(plr, wep, true);	
 	return HOOK_CONTINUE;
 }
 
@@ -565,9 +426,37 @@ HookReturnCode PlayerPreThink(CBasePlayer@ plr, uint&out test) {
 		return HOOK_CONTINUE;
 	}
 	
-	// need to poll to know when a player released the secondary fire button for gauss chargeup
-	update_gauss_charge_state(plr);
+	return HOOK_CONTINUE;
+}
+
+int playerPostThinkAmmo = 0;
+
+// called before weapon primary fire code for a single player
+HookReturnCode PlayerPostThink(CBasePlayer@ plr) {		
+	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+	if (wep !is null) {
+		playerPostThinkAmmo = wep.m_iClip;
+		
+		PlayerState@ state = getPlayerState(plr);
+		rewind_monsters(plr, state);
+	}
 	
 	return HOOK_CONTINUE;
 }
 
+// called after weapon primary fire code for a single player
+HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags )
+{	
+	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+	if (wep !is null) {
+		PlayerState@ state = getPlayerState(plr);
+		
+		bool didPlayerShoot = wep.m_iClip != playerPostThinkAmmo;
+		
+		CBaseEntity@ hitTarget = undo_rewind_monsters(state, didPlayerShoot);
+		if (state.hitmarker && hitTarget !is null) {
+			show_hit_marker(plr, hitTarget);
+		}
+	}
+	return HOOK_CONTINUE;
+}
