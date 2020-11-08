@@ -1,4 +1,5 @@
 #include "weapons"
+#include "commands"
 #include "util"
 
 // TODO:
@@ -29,19 +30,9 @@
 //   - headcrab, zombie, gonome, alien grunt, alien slave, bullsquid, pit drone, voltigore, grunt, shocktrooper
 
 const float MAX_LAG_COMPENSATION_TIME = 2.0f; // 2 seconds
-const float BULLET_RANGE = 8192;
-const string CUSTOM_DAMAGE_KEY = "$f_lagc_dmg"; // used to restore custom damage values on lagged bullets
-const string WEAPON_STATE_KEY = "$i_lagc_state"; // weapon compensation state
 const string hitmarker_spr = "sprites/misc/mlg.spr";
 const string hitmarker_snd = "misc/hitmarker.mp3";
-const int BULLET_UZI = 0;
-const int BULLET_GAUSS = 8;
-const int BULLET_GAUSS2 = 9;
-const int BULLET_EGON = 10;
 
-bool shotgun_doubleshot_mode = false;
-bool pistol_silencer_mode = false;
-bool is_classic_mode = false;
 bool g_enabled = true;
 float g_update_delay = 0.05f; // time between monster state updates
 CScheduledFunction@ update_interval = null;
@@ -50,22 +41,72 @@ CScheduledFunction@ cvar_interval = null;
 CScheduledFunction@ cleanup_interval = null;
 
 array<LagEnt> laggyEnts; // ents that are lag compensated
-array<float> g_bullet_damage; // used to calculate compensated bullet damage
-array<float> last_shoot; // needed to calculate recoil. punchangle is not updated when shooting weapons.
-array<float> gauss_start_charge; // needed to calculate how much damage to apply for secondary fire
-
-// stuff needed to know if a player shot or nod
-array<int> last_shotgun_clips; // none of the weapon props are reliable.
-array<int> last_minigun_clips; // seconday fire hook is called many times for a single bullet.
-array<float> egon_last_dmg; // egon fires at 10fps, but hook called at one gorllion fps.
-
 dictionary g_monster_blacklist; // don't track these - waste of time
-dictionary g_weapon_info;
-
 dictionary g_player_states;
 int g_state_count = 0;
 
-CClientCommand _lagc("lagc", "Lag compensation commands", @consoleCmd );
+enum AdjustModes {
+	ADJUST_NONE, // use ping value
+	ADJUST_ADD, // add to ping value
+	ADJUST_SUB // subtract from ping value
+}
+
+class PlayerState {
+	// Never store player handle? It needs to be set to null on disconnect or else states start sharing
+	// player handles and cause weird bugs or break states entirely. Check if disconnect is called
+	// if player leaves during level change.
+
+	bool enabled = true;
+	int compensation = 0;
+	int adjustMode = 0;
+	int debug = 0;
+	bool hitmarker = true;
+}
+
+class EntState {
+	float time;
+	Vector origin;
+	Vector angles;
+	int sequence;
+	float frame;
+}
+
+class LagEnt {
+	EHandle h_ent;
+	
+	EntState currentState; // only updated on shoots
+	array<EntState> history;
+	bool isRewound = false;
+	
+	LagEnt() {}
+	
+	LagEnt(CBaseEntity@ ent) {
+		h_ent = EHandle(ent);
+	}
+	
+	bool update_history() {
+		CBaseEntity@ ent = h_ent;
+		
+		if (ent is null) {
+			return false;
+		}
+		
+		EntState state;
+		state.time = g_Engine.time;
+		state.origin = ent.pev.origin;
+		state.angles = ent.pev.angles;
+		state.sequence = ent.pev.sequence;
+		state.frame = ent.pev.frame;
+		
+		history.insertLast(state);
+		
+		while (history[0].time < g_Engine.time - MAX_LAG_COMPENSATION_TIME) {
+			history.removeAt(0);
+		}
+		
+		return true;
+	}
+}
 
 void PluginInit()  {
 	g_Module.ScriptInfo.SetAuthor( "w00tguy" );
@@ -113,28 +154,6 @@ void PluginInit()  {
 	}
 }
 
-void start_polling() {
-	println("lagc polling started");
-	@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
-	@cvar_interval = g_Scheduler.SetInterval("refresh_cvars", 5.0f, -1);
-	@cleanup_interval = g_Scheduler.SetInterval("cleanup_ents", 5.0f, -1);
-	
-	// interval must be faster than any weapon can deploy
-	@player_state_interval = g_Scheduler.SetInterval("refresh_player_states", 0.5f, -1);
-}
-
-void stop_polling() {
-	println("lagc polling stopped");
-	g_Scheduler.RemoveTimer(update_interval);
-	g_Scheduler.RemoveTimer(player_state_interval);
-	g_Scheduler.RemoveTimer(cvar_interval);
-	g_Scheduler.RemoveTimer(cleanup_interval);
-	@update_interval = null;
-	@player_state_interval = null;
-	@cvar_interval = null;
-	@cleanup_interval = null;
-}
-
 void MapInit() {
 	g_Game.PrecacheModel(hitmarker_spr);
 	g_SoundSystem.PrecacheSound(hitmarker_snd);
@@ -161,6 +180,28 @@ HookReturnCode MapChange() {
 	return HOOK_CONTINUE;
 }
 
+void start_polling() {
+	println("lagc polling started");
+	@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
+	@cvar_interval = g_Scheduler.SetInterval("refresh_cvars", 5.0f, -1);
+	@cleanup_interval = g_Scheduler.SetInterval("cleanup_ents", 5.0f, -1);
+	
+	// interval must be faster than any weapon can deploy
+	@player_state_interval = g_Scheduler.SetInterval("refresh_player_states", 0.5f, -1);
+}
+
+void stop_polling() {
+	println("lagc polling stopped");
+	g_Scheduler.RemoveTimer(update_interval);
+	g_Scheduler.RemoveTimer(player_state_interval);
+	g_Scheduler.RemoveTimer(cvar_interval);
+	g_Scheduler.RemoveTimer(cleanup_interval);
+	@update_interval = null;
+	@player_state_interval = null;
+	@cvar_interval = null;
+	@cleanup_interval = null;
+}
+
 void late_init() {
 	check_classic_mode();
 
@@ -171,115 +212,6 @@ void late_init() {
 		
 	reload_ents();
 	start_polling();
-}
-
-enum WeaponCompensationStates {
-	// default mode for all weapons. The plugin needs to modify the gun so it works properly
-	WEP_NOT_INITIALIZED,
-	
-	// weapon has been modified so that only this plugin can deal damage.
-	// That means saving any map-specific damage to a separate keyvalue, then
-	// setting the custom damage to 0, so that it uses the skill setting (which will also be 0, unless 556 ammo is used)
-	WEP_COMPENSATE_ON,
-	
-	// weapon has a custom damage set so that the default sven damage logic works.
-	// A custom damage is needed because the skill settings will all be set to 0.
-	WEP_COMPENSATE_OFF
-}
-
-enum AdjustModes {
-	ADJUST_NONE, // use ping value
-	ADJUST_ADD, // add to ping value
-	ADJUST_SUB // subtract from ping value
-}
-
-class PlayerState
-{
-	// Never store player handle? It needs to be set to null on disconnect or else states start sharing
-	// player handles and cause weird bugs or break states entirely. Check if disconnect is called
-	// if player leaves during level change.
-
-	bool enabled = true;
-	int compensation = 0;
-	int adjustMode = 0;
-	int debug = 0;
-	bool hitmarker = true;
-}
-
-class WeaponInfo {
-	int bulletType;
-	int dmgType;
-	Vector spread;
-	string skillSetting;
-
-	WeaponInfo() {}
-	
-	WeaponInfo(int bulletType, int dmgType, Vector spread, string skillSetting) {
-		this.bulletType = bulletType;
-		this.dmgType = dmgType;
-		this.spread = spread;
-		this.skillSetting = skillSetting;
-	}
-}
-
-class LagBullet {
-	Vector vecAim;
-	float damage;
-	
-	LagBullet() {}
-	
-	LagBullet(Vector spread, float damage) {	
-		float x, y;
-		g_Utility.GetCircularGaussianSpread( x, y );
-		
-		this.vecAim = g_Engine.v_forward + x*spread.x*g_Engine.v_right + y*spread.y*g_Engine.v_up;
-		this.damage = damage;
-	}
-}
-
-class EntState {
-	float time;
-	Vector origin;
-	Vector angles;
-	int sequence;
-	float frame;
-}
-
-class LagEnt {
-	EHandle h_ent;
-	
-	EntState currentState; // only updated on shoots
-	array<EntState> history;
-	bool isRewound = false;
-	
-	LagEnt() {}
-	
-	LagEnt(CBaseEntity@ ent) {
-		h_ent = EHandle(ent);
-	}
-	
-	bool update_history() {
-		CBaseEntity@ ent = h_ent;
-		
-		if (ent is null) {
-			return false;
-		}
-		
-		EntState state;
-		state.time = g_Engine.time;
-		state.origin = ent.pev.origin;
-		state.angles = ent.pev.angles;
-		state.sequence = ent.pev.sequence;
-		state.frame = ent.pev.frame;
-		
-		history.insertLast(state);
-		
-		while (history[0].time < g_Engine.time - MAX_LAG_COMPENSATION_TIME) {
-			history.removeAt(0);
-		}
-		
-		return true;
-	}
 }
 
 void add_lag_comp_ent(CBaseEntity@ ent) {
@@ -611,250 +543,3 @@ HookReturnCode PlayerPreThink(CBasePlayer@ plr, uint&out test) {
 	return HOOK_CONTINUE;
 }
 
-void debug_stats(CBasePlayer@ debugger) {
-	
-	int count = 0;
-	int total = 0;
-	for ( int i = 1; i <= g_Engine.maxClients; i++ )
-	{
-		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
-		if (plr is null or !plr.IsConnected())
-			continue;
-		
-		total++;
-		PlayerState@ state = getPlayerState(plr);
-		if (state.enabled) {
-			count++;
-		}
-	}
-	
-	g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, '\nPlayers using compensation (' + count + ' / ' + total + '):\n');
-	
-	for ( int i = 1; i <= g_Engine.maxClients; i++ )
-	{
-		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
-		if (plr is null or !plr.IsConnected())
-			continue;
-		
-		PlayerState@ state = getPlayerState(plr);
-		
-		if (state.enabled) {
-			string mode = "auto";
-			if (state.adjustMode == ADJUST_ADD) {
-				mode = "ping +" + state.compensation + "ms";
-			} else if (state.adjustMode == ADJUST_SUB) {
-				mode = "ping -" + state.compensation + "ms";
-			}
-			
-			mode += ", hitmarks " + (state.hitmarker ? "ON" : "OFF") + ", debug " + state.debug;
-				
-			g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, '    ' + plr.pev.netname + ": " + mode + "\n");
-		}
-	}
-	
-	g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "\nCompensated entities (" + laggyEnts.size() + "):\n");
-	for (uint i = 0; i < laggyEnts.size(); i++ )
-	{
-		LagEnt lagEnt = laggyEnts[i];
-		CBaseEntity@ ent = lagEnt.h_ent;
-		string cname = ent !is null ? string(ent.pev.classname) : "null";
-		
-		g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "    " + cname + ": " + lagEnt.history.size() + " states\n");
-	}
-}
-
-bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=false) {
-	PlayerState@ state = getPlayerState(plr);
-	bool isAdmin = g_PlayerFuncs.AdminLevel(plr) >= ADMIN_YES;
-	
-	if ( args.ArgC() > 0 )
-	{
-		if (args[0] == ".lagc") {
-			if (args.ArgC() > 1) {
-				string arg = args[1];
-				
-				if (arg == "info") {
-					state.debug = state.debug == 0 ? 1 : 0;
-					g_PlayerFuncs.SayText(plr, "Lag compensation info " + (state.debug > 0 ? "enabled" : "disabled") + "\n");
-				} 
-				else if (arg == "x" || arg == "hitmarker") {
-					state.hitmarker = !state.hitmarker;
-					if (state.hitmarker) {
-						state.enabled = true;
-					}
-					g_PlayerFuncs.SayText(plr, "Lag compensation hitmarker " + (state.hitmarker ? "enabled" : "disabled") + "\n");
-				}
-				else if (arg == "debug" && isAdmin) {
-					state.enabled = true;
-					state.debug = state.debug != 2 ? 2 : 0;
-					g_PlayerFuncs.SayText(plr, "Lag compensation debug mode " + (state.debug > 0 ? "enabled" : "disabled") + "\n");
-				}
-				else if (arg == "pause" && isAdmin) {
-					g_enabled = false;
-					enable_default_damages();
-					g_PlayerFuncs.SayTextAll(plr, "Lag compensation plugin disabled.\n");
-				}
-				else if (arg == "resume" && isAdmin) {
-					g_enabled = true;
-					reload_ents();
-					disable_default_damages();
-					g_PlayerFuncs.SayTextAll(plr, "Lag compensation plugin enabled. Say '.lagc' for help.\n");
-				}
-				else if (arg == "reload" && isAdmin) {
-					g_PlayerFuncs.SayTextAll(plr, "Reloaded skill settings\n");
-					reload_skill_files();
-					late_init();
-					reload_ents();
-					reset_weapon_damages();
-				}
-				else if (arg == "stats") {
-					debug_stats(plr);
-				}
-				else if (arg == "rate" && isAdmin) {
-					if (args.ArgC() > 2) {
-						g_update_delay = Math.min(atof(args[2]), 1.0f);
-						if (g_update_delay < 0) {
-							g_update_delay = 0;
-						}
-						g_Scheduler.RemoveTimer(update_interval);
-						@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
-						g_PlayerFuncs.SayText(plr, "Lag compensation rate set to " + g_update_delay + "\n");
-					}
-				}
-				else if (arg == "test" && isAdmin) {
-					CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-					if (wep !is null) {
-						debug_bullet_damage(plr, wep, 0, false);
-					}
-				}
-				else if (arg == "on") {
-					state.enabled = true;
-					state.compensation = -1;
-					g_PlayerFuncs.SayText(plr, "Lag compensation enabled (auto)\n");
-				}
-				else if (arg == "off") {
-					state.enabled = false;
-					state.compensation = 0;
-					state.adjustMode = ADJUST_NONE;
-					g_PlayerFuncs.SayText(plr, "Lag compensation disabled\n");
-				}
-				else if (arg == "toggle") {
-					state.enabled = !state.enabled;
-					state.compensation = 0;
-					state.adjustMode = ADJUST_NONE;
-					g_PlayerFuncs.SayText(plr, "Lag compensation " + (state.enabled ? "enabled" : "disabled") + "\n");
-				}
-				else if (arg == "auto") {
-					state.enabled = true;
-					state.compensation = 0;
-					g_PlayerFuncs.SayText(plr, "Lag compensation set to auto\n");
-				} 
-				else {
-					int adjustMode = ADJUST_ADD;
-					
-					if (arg[0] == '=') {
-						adjustMode = ADJUST_NONE;
-						arg = arg.SubString(1);
-						println("NEWARG " + arg);
-					}
-					else if (arg[0] == '-') {
-						adjustMode = ADJUST_SUB;
-						arg = arg.SubString(1);
-					}
-					
-					int amt = Math.min(atoi(arg), int(MAX_LAG_COMPENSATION_TIME*1000));
-					if (amt < -1) {
-						amt = -1;
-					}
-					
-					state.compensation = amt;
-					state.adjustMode = adjustMode;
-					state.enabled = true;
-					
-					if (adjustMode == ADJUST_NONE) {
-						g_PlayerFuncs.SayText(plr, "Lag compensation set to " + state.compensation + "ms\n");
-					} else {
-						string prefix = adjustMode == ADJUST_ADD ? "ping + " : "ping - ";
-						g_PlayerFuncs.SayText(plr, "Lag compensation set to " + prefix + state.compensation + "ms\n");
-					}
-				}				
-			} else {
-				int maxComp = int(MAX_LAG_COMPENSATION_TIME*1000);
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '-----------------------------Lag Compensation Commands-----------------------------\n\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, 'Lag compensation "rewinds" enemies so that you don\'t have to aim ahead of them to get a hit.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nType ".lagc [on/off/toggle]" to enable or disable lag compensation.\n');
-				
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nIf you still need to aim ahead/behind enemies to hit them, then try one of these commands:\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc +X" to increase compensation.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc -X" to decrease compensation.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc =X" to set a specific compensation.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc auto" to use the default compensation.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    X = milliseconds\n');
-				
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nIf you\'re unsure how to adjust compensation, try these commands:\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc info" to toggle compensation messages.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        This will show your compensation ping when you shoot.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        Try matching it with the ping you see in net_graph.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        The net_graph ping might be more accurate than the scoreboard.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        To turn on net_graph, type \'net_graph 2\' in this console.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc x" to toggle hit confirmations.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        This will make it obvious when you hit a target. Blood effects\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        are unreliable due to how this plugin works.\n');
-				
-				if (isAdmin) {
-					g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nAdmins only:');
-					g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\n    Type ".lagc debug" to toggle compensation visualizations.\n        - This may cause extreme lag and/or desyncs!\n');
-					g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc [pause/resume]" to enable or disable ths plugin.\n        - Try this if the server is lagging horribly.\n');
-				}
-				
-				string mode = " (auto)";
-				if (state.adjustMode == ADJUST_ADD) {
-					mode = " (ping + " + state.compensation + "ms)";
-				} else if (state.adjustMode == ADJUST_SUB) {
-					mode = " (ping - " + state.compensation + "ms)";
-				}
-				if (!state.enabled) {
-					mode = "";
-				}
-				
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nYour settings:\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Compensation is ' + (state.enabled ? 'enabled' : 'disabled') + mode + '\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Hitmarkers are ' + (state.hitmarker ? 'enabled' : 'disabled') + '\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Info messages are ' + (state.debug > 0 ? 'enabled' : 'disabled') + '\n');
-				
-				if (!g_enabled)
-					g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nThe lag compensation plugin is currently disabled.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\n-----------------------------------------------------------------------------------\n');
-			
-				if (!isConsoleCommand) {
-					if (g_enabled) {
-						g_PlayerFuncs.SayText(plr, 'Lag compensation is ' + (state.enabled ? 'enabled' : 'disabled') + mode + '\n');
-						g_PlayerFuncs.SayText(plr, 'Say ".lagc [on/off/toggle]" to enable or disable lag compensation.\n');
-						g_PlayerFuncs.SayText(plr, 'Say ".lagc x" to toggle hit confirmations.\n');
-					}
-					else
-						g_PlayerFuncs.SayText(plr, 'The lag compensation plugin is currently disabled.\n');
-					g_PlayerFuncs.SayText(plr, 'Type ".lagc" in console for more commands/info\n');
-				}
-			}
-			return true;
-		}
-	}
-	return false;
-}
-
-HookReturnCode ClientSay( SayParameters@ pParams ) {
-	CBasePlayer@ plr = pParams.GetPlayer();
-	const CCommand@ args = pParams.GetArguments();	
-	if (doCommand(plr, args, false))
-	{
-		pParams.ShouldHide = true;
-		return HOOK_HANDLED;
-	}
-	return HOOK_CONTINUE;
-}
-
-void consoleCmd( const CCommand@ args ) {
-	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
-	doCommand(plr, args, true);
-}
