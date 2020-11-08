@@ -4,6 +4,73 @@
 
 // This is full of hacks and reverse-engineered code which will break if weapons are ever rebalanced.
 
+const int BULLET_UZI = 0;
+const int BULLET_GAUSS = 8;
+const int BULLET_GAUSS2 = 9;
+const int BULLET_EGON = 10;
+const float BULLET_RANGE = 8192;
+const string CUSTOM_DAMAGE_KEY = "$f_lagc_dmg"; // used to restore custom damage values on lagged bullets
+const string WEAPON_STATE_KEY = "$i_lagc_state"; // weapon compensation state
+
+bool shotgun_doubleshot_mode = false;
+bool pistol_silencer_mode = false;
+bool is_classic_mode = false;
+
+array<float> g_bullet_damage; // used to calculate compensated bullet damage
+array<float> last_shoot; // needed to calculate recoil. punchangle is not updated when shooting weapons.
+array<float> gauss_start_charge; // needed to calculate how much damage to apply for secondary fire
+
+// stuff needed to know if a player shot or nod
+array<int> last_shotgun_clips; // none of the weapon props are reliable.
+array<int> last_minigun_clips; // seconday fire hook is called many times for a single bullet.
+array<float> egon_last_dmg; // egon fires at 10fps, but hook called at one gorllion fps.
+dictionary g_weapon_info;
+
+enum WeaponCompensationStates {
+	// default mode for all weapons. The plugin needs to modify the gun so it works properly
+	WEP_NOT_INITIALIZED,
+	
+	// weapon has been modified so that only this plugin can deal damage.
+	// That means saving any map-specific damage to a separate keyvalue, then
+	// setting the custom damage to 0, so that it uses the skill setting (which will also be 0, unless 556 ammo is used)
+	WEP_COMPENSATE_ON,
+	
+	// weapon has a custom damage set so that the default sven damage logic works.
+	// A custom damage is needed because the skill settings will all be set to 0.
+	WEP_COMPENSATE_OFF
+}
+
+class WeaponInfo {
+	int bulletType;
+	int dmgType;
+	Vector spread;
+	string skillSetting;
+
+	WeaponInfo() {}
+	
+	WeaponInfo(int bulletType, int dmgType, Vector spread, string skillSetting) {
+		this.bulletType = bulletType;
+		this.dmgType = dmgType;
+		this.spread = spread;
+		this.skillSetting = skillSetting;
+	}
+}
+
+class LagBullet {
+	Vector vecAim;
+	float damage;
+	
+	LagBullet() {}
+	
+	LagBullet(Vector spread, float damage) {	
+		float x, y;
+		g_Utility.GetCircularGaussianSpread( x, y );
+		
+		this.vecAim = g_Engine.v_forward + x*spread.x*g_Engine.v_right + y*spread.y*g_Engine.v_up;
+		this.damage = damage;
+	}
+}
+
 void init_weapon_info() {
 	g_weapon_info["weapon_9mmhandgun"] = WeaponInfo(
 		BULLET_PLAYER_9MM,
@@ -615,45 +682,4 @@ array<LagBullet> get_bullets(CBasePlayer@ plr, CBasePlayerWeapon@ wep, bool isSe
 	}
 	
 	return bullets;
-}
-
-void debug_bullet_damage(CBasePlayer@ plr, CBasePlayerWeapon@ wep, float plugin_dmg, bool is_comp) {
-	WeaponInfo@ wepInfo = cast<WeaponInfo@>( g_weapon_info[wep.pev.classname] );
-	if (wepInfo is null) {
-		g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "Unsupported weapon\n");
-		return;
-	}
-
-	KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
-	CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
-
-	float custom_damage = wep.m_flCustomDmg;
-	int state = WEP_NOT_INITIALIZED;
-	if (pCustom.HasKeyvalue(WEAPON_STATE_KEY)) {
-		state = pCustom.GetKeyvalue(WEAPON_STATE_KEY).GetInteger();
-	}
-
-	string dmg = "m_flCustomDmg = " + custom_damage;
-	if (is_comp) {
-		dmg += ", plugin = " + plugin_dmg;
-	}
-	
-	if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
-		float key_damage = pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ).GetFloat();
-		dmg += ", " + CUSTOM_DAMAGE_KEY + " = " + key_damage;
-	}
-	if (custom_damage < 1.0f) {
-		float skillDmg = g_EngineFuncs.CVarGetFloat(wepInfo.skillSetting);
-	
-		dmg += ", " + wepInfo.skillSetting + " = " + skillDmg;
-	}
-	if (state == WEP_NOT_INITIALIZED) {
-		dmg += " (NOT INIT)";
-	} else if (state == WEP_COMPENSATE_ON) {
-		dmg += " (COMP ON)";
-	} else if (state == WEP_COMPENSATE_OFF) {
-		dmg += " (COMP OFF)";
-	}
-	
-	g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "" + wep.pev.classname + ": "  + dmg + "\n");
 }
