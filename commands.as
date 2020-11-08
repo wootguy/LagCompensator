@@ -1,47 +1,6 @@
 
 CClientCommand _lagc("lagc", "Lag compensation commands", @consoleCmd );
 
-void debug_bullet_damage(CBasePlayer@ plr, CBasePlayerWeapon@ wep, float plugin_dmg, bool is_comp) {
-	WeaponInfo@ wepInfo = cast<WeaponInfo@>( g_weapon_info[wep.pev.classname] );
-	if (wepInfo is null) {
-		g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "Unsupported weapon\n");
-		return;
-	}
-
-	KeyValueBuffer@ pKeyvalues = g_EngineFuncs.GetInfoKeyBuffer( wep.edict() );
-	CustomKeyvalues@ pCustom = wep.GetCustomKeyvalues();
-
-	float custom_damage = wep.m_flCustomDmg;
-	int state = WEP_NOT_INITIALIZED;
-	if (pCustom.HasKeyvalue(WEAPON_STATE_KEY)) {
-		state = pCustom.GetKeyvalue(WEAPON_STATE_KEY).GetInteger();
-	}
-
-	string dmg = "m_flCustomDmg = " + custom_damage;
-	if (is_comp) {
-		dmg += ", plugin = " + plugin_dmg;
-	}
-	
-	if (pCustom.HasKeyvalue(CUSTOM_DAMAGE_KEY)) {
-		float key_damage = pCustom.GetKeyvalue( CUSTOM_DAMAGE_KEY ).GetFloat();
-		dmg += ", " + CUSTOM_DAMAGE_KEY + " = " + key_damage;
-	}
-	if (custom_damage < 1.0f) {
-		float skillDmg = g_EngineFuncs.CVarGetFloat(wepInfo.skillSetting);
-	
-		dmg += ", " + wepInfo.skillSetting + " = " + skillDmg;
-	}
-	if (state == WEP_NOT_INITIALIZED) {
-		dmg += " (NOT INIT)";
-	} else if (state == WEP_COMPENSATE_ON) {
-		dmg += " (COMP ON)";
-	} else if (state == WEP_COMPENSATE_OFF) {
-		dmg += " (COMP OFF)";
-	}
-	
-	g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "" + wep.pev.classname + ": "  + dmg + "\n");
-}
-
 void debug_stats(CBasePlayer@ debugger) {
 	
 	int count = 0;
@@ -125,21 +84,12 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				}
 				else if (arg == "pause" && isAdmin) {
 					g_enabled = false;
-					enable_default_damages();
 					g_PlayerFuncs.SayTextAll(plr, "Lag compensation plugin disabled.\n");
 				}
 				else if (arg == "resume" && isAdmin) {
 					g_enabled = true;
 					reload_ents();
-					disable_default_damages();
 					g_PlayerFuncs.SayTextAll(plr, "Lag compensation plugin enabled. Say '.lagc' for help.\n");
-				}
-				else if (arg == "reload" && isAdmin) {
-					g_PlayerFuncs.SayTextAll(plr, "Reloaded skill settings\n");
-					reload_skill_files();
-					late_init();
-					reload_ents();
-					reset_weapon_damages();
 				}
 				else if (arg == "stats") {
 					debug_stats(plr);
@@ -156,10 +106,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 					}
 				}
 				else if (arg == "test" && isAdmin) {
-					CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-					if (wep !is null) {
-						debug_bullet_damage(plr, wep, 0, false);
-					}
+					
 				}
 				else if (arg == "forcex" && isAdmin) {
 					array<string>@ stateKeys = g_player_states.getKeys();
