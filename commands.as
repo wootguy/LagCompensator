@@ -161,6 +161,15 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 						debug_bullet_damage(plr, wep, 0, false);
 					}
 				}
+				else if (arg == "forcex" && isAdmin) {
+					array<string>@ stateKeys = g_player_states.getKeys();
+					for (uint i = 0; i < stateKeys.length(); i++)
+					{
+						PlayerState@ s = cast<PlayerState@>( g_player_states[stateKeys[i]] );
+						s.hitmarker = true;
+					}
+					g_PlayerFuncs.SayTextAll(plr, "Hitmarkers forced on. Say \".lagc x\" to turn them off.\n");
+				}
 				else if (arg == "on") {
 					state.enabled = true;
 					state.compensation = -1;
