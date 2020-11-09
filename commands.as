@@ -56,6 +56,52 @@ void debug_stats(CBasePlayer@ debugger) {
 	}
 }
 
+void debug_perf(EHandle h_plr) {
+	CBasePlayer@ plr = cast<CBasePlayer@>(h_plr.GetEntity());
+	
+	if (plr is null or !plr.IsConnected()) {
+		return;
+	}
+	
+	HUDTextParams params;
+	params.effect = 0;
+	params.fadeinTime = 0;
+	params.fadeoutTime = 0.1;
+	params.holdTime = 1.5f;
+	
+	params.x = -1;
+	params.y = 0.99;
+	params.channel = 2;
+	
+	if (g_stat_rps > 10000) {
+		params.r1 = 255;
+		params.g1 = 0;
+		params.b1 = 0;
+	} else if (g_stat_rps > 5000) {
+		params.r1 = 255;
+		params.g1 = 128;
+		params.b1 = 0;
+	} else if (g_stat_rps > 2500) {
+		params.r1 = 255;
+		params.g1 = 255;
+		params.b1 = 0;
+	} else {
+		params.r1 = 0;
+		params.g1 = 255;
+		params.b1 = 0;
+	}
+	
+	
+	string info = "RPS: " + g_stat_rps + ", CPS: " + g_stat_comps + "\nEntities: " + laggyEnts.size();
+	
+	g_PlayerFuncs.HudMessage(plr, params, info);
+	
+	PlayerState@ state = getPlayerState(plr);
+	if (state.perfDebug) {
+		g_Scheduler.SetTimeout("debug_perf", 1.0f, h_plr);
+	}
+}
+
 bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=false) {
 	PlayerState@ state = getPlayerState(plr);
 	bool isAdmin = g_PlayerFuncs.AdminLevel(plr) >= ADMIN_YES;
@@ -107,6 +153,11 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				}
 				else if (arg == "test" && isAdmin) {
 					
+				}
+				else if (arg == "perf") {
+					state.perfDebug = !state.perfDebug;
+					if (state.perfDebug)
+						debug_perf(EHandle(plr));
 				}
 				else if (arg == "forcex" && isAdmin) {
 					array<string>@ stateKeys = g_player_states.getKeys();
