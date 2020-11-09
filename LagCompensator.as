@@ -1,16 +1,15 @@
+#include "custom_weapons"
 #include "commands"
 #include "util"
 
 // TODO:
 // - auto-enable for high pings?
 // - global history timestep
-// - performance stats
-// - test custom weapons
 
 // minor todo:
 // - compensate moving platforms somehow?
 // - compensate moving breakable solids and/or buttons
-// - custom weapon support?
+// - custom weapon support for all maps and plugins (ohgod)
 // - double shotgun compensated while reloading
 
 // unfixable bugs:
@@ -52,7 +51,7 @@ class PlayerState {
 	int compensation = 0;
 	int adjustMode = 0;
 	int debug = 0;
-	bool hitmarker = true;
+	bool hitmarker = false;
 	bool perfDebug = false; // show performance stats
 }
 
@@ -115,8 +114,6 @@ void PluginInit()  {
 	lastM16Delay2.resize(33);
 	
 	g_Hooks.RegisterHook( Hooks::Player::ClientSay, @ClientSay );
-	g_Hooks.RegisterHook( Hooks::Weapon::WeaponPrimaryAttack, @WeaponPrimaryAttack );
-	g_Hooks.RegisterHook( Hooks::Weapon::WeaponSecondaryAttack, @WeaponSecondaryAttack );
 	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
 	g_Hooks.RegisterHook( Hooks::Player::ClientPutInServer, @ClientJoin );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerPostThink, @PlayerPostThink );
@@ -439,14 +436,6 @@ void show_hit_marker(CBasePlayer@ plr, CBaseEntity@ target) {
 	g_SoundSystem.PlaySound(target.edict(), CHAN_AUTO, hitmarker_snd, 0.8f, 0.0f, 0, 100, plr.entindex());
 }
 
-HookReturnCode WeaponPrimaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
-	return HOOK_CONTINUE;
-}
-
-HookReturnCode WeaponSecondaryAttack(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
-	return HOOK_CONTINUE;
-}
-
 HookReturnCode EntityCreated(CBaseEntity@ ent){
 	if (!g_enabled) {
 		return HOOK_CONTINUE;
@@ -474,7 +463,12 @@ int g_compensations = 0;
 int playerPostThinkAmmo = 0;
 bool playerWasCompensated = false;
 
-bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
+// will the weapon fire this frame?
+bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {		
+	if (g_CustomEntityFuncs.IsCustomEntity(wep.pev.classname)) {
+		return can_custom_weapon_fire(plr, wep);
+	}
+	
 	if (plr.m_flNextAttack > 0)
 		return false;
 
@@ -520,7 +514,8 @@ bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 	}
 	else if (wep.pev.classname == "weapon_egon") {
 		return hasPrimaryAmmo && (primaryFire && !secondaryFire) && wep.pev.dmgtime < g_Engine.time && wep.m_flNextPrimaryAttack < g_Engine.time && !inWater;
-	} else if (wep.pev.classname == "weapon_shockrifle") {
+	}
+	else if (wep.pev.classname == "weapon_shockrifle") {
 		float nextDmg = wep.pev.dmgtime - g_Engine.time;
 		return hasPrimaryAmmo && wep.m_flNextSecondaryAttack <= 0 && secondaryFire && nextDmg < 0 && !inWater;
 	}
