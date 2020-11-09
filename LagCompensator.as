@@ -3,21 +3,17 @@
 
 // TODO:
 // - auto-enable for high pings?
-// - EVERYTHING is gibbing when disabled (undo gib after the shot possible?)
-// - check normal shotgun spread
-// - custom weapon NO DAMAGE (pizza san)
-
-// can't reproduce:
-// - extreme lag barnacle weapon op_blackmesa4
+// - global history timestep
+// - performance stats
+// - test custom weapons
 
 // minor todo:
 // - compensate moving platforms somehow?
 // - compensate moving breakable solids and/or buttons
-// - move blood effect closer to monster (required linking monsters to LagEnt)
-// - show monster info at rewind position
-// - performance improvements: filter visible monsters before rewind?
-// - use BulletAccuracy method somehow
 // - custom weapon support?
+
+// unfixable bugs:
+// - blood effect shows in the unlagged position
 
 const float MAX_LAG_COMPENSATION_TIME = 2.0f; // 2 seconds
 const string hitmarker_spr = "sprites/misc/mlg.spr";
@@ -31,7 +27,12 @@ CScheduledFunction@ cleanup_interval = null;
 array<LagEnt> laggyEnts; // ents that are lag compensated
 dictionary g_monster_blacklist; // don't track these - waste of time
 dictionary g_player_states;
+dictionary g_no_compensate_weapons; // skip compensating these weapons to improve performance
 int g_state_count = 0;
+int g_rewind_count = 0;
+int g_stat_rps = 0;
+int g_stat_comps = 0;
+array<int> lastPlrButtons; // player button properties dont't work right for secondary/tertiary fire
 
 enum AdjustModes {
 	ADJUST_NONE, // use ping value
@@ -66,6 +67,7 @@ class LagEnt {
 	EntState debugState; // used to display a debug model when a player shoots
 	array<EntState> history;
 	bool isRewound = false;
+	bool hasEnoughHistory = false;
 	
 	LagEnt() {}
 	
@@ -91,6 +93,7 @@ class LagEnt {
 		
 		while (history[0].time < g_Engine.time - MAX_LAG_COMPENSATION_TIME) {
 			history.removeAt(0);
+			hasEnoughHistory = true;
 		}
 		
 		return true;
@@ -101,12 +104,13 @@ void PluginInit()  {
 	g_Module.ScriptInfo.SetAuthor( "w00tguy" );
 	g_Module.ScriptInfo.SetContactInfo( "https://github.com/wootguy" );
 	
+	lastPlrButtons.resize(33);
+	
 	g_Hooks.RegisterHook( Hooks::Player::ClientSay, @ClientSay );
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponPrimaryAttack, @WeaponPrimaryAttack );
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponSecondaryAttack, @WeaponSecondaryAttack );
 	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
 	g_Hooks.RegisterHook( Hooks::Player::ClientPutInServer, @ClientJoin );
-	g_Hooks.RegisterHook( Hooks::Player::PlayerPreThink, @PlayerPreThink );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerPostThink, @PlayerPostThink );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerUse, @PlayerUse );
 	g_Hooks.RegisterHook( Hooks::Game::MapChange, @MapChange );
@@ -133,6 +137,21 @@ void PluginInit()  {
 	if (g_Engine.time > 4) { // plugin reloaded mid-map?
 		late_init();
 	}
+	
+	g_no_compensate_weapons["weapon_crowbar"] = true;
+	g_no_compensate_weapons["weapon_pipewrench"] = true;
+	g_no_compensate_weapons["weapon_medkit"] = true;
+	g_no_compensate_weapons["weapon_crossbow"] = true;
+	g_no_compensate_weapons["weapon_rpg"] = true;
+	g_no_compensate_weapons["weapon_hornetgun"] = true;
+	g_no_compensate_weapons["weapon_handgrenade"] = true;
+	g_no_compensate_weapons["weapon_satchel"] = true;
+	g_no_compensate_weapons["weapon_tripmine"] = true;
+	g_no_compensate_weapons["weapon_snark"] = true;
+	g_no_compensate_weapons["weapon_sporelauncher"] = true;
+	g_no_compensate_weapons["weapon_displacer"] = true;
+	
+	g_Scheduler.SetInterval("rewind_stats", 1.0f, -1);
 }
 
 void MapInit() {
@@ -151,13 +170,11 @@ HookReturnCode MapChange() {
 }
 
 void start_polling() {
-	println("lagc polling started");
 	@update_interval = g_Scheduler.SetInterval("update_ent_history", g_update_delay, -1);
-	@cleanup_interval = g_Scheduler.SetInterval("cleanup_ents", 5.0f, -1);
+	@cleanup_interval = g_Scheduler.SetInterval("cleanup_ents", 0.5f, -1);
 }
 
 void stop_polling() {
-	println("lagc polling stopped");
 	g_Scheduler.RemoveTimer(update_interval);
 	g_Scheduler.RemoveTimer(cleanup_interval);
 	@update_interval = null;
@@ -167,6 +184,14 @@ void stop_polling() {
 void late_init() {		
 	reload_ents();
 	start_polling();
+}
+
+void rewind_stats() {
+	g_stat_rps = int(float(g_rewind_count) / 1.0f);
+	g_stat_comps = g_compensations;
+	
+	g_rewind_count = 0;
+	g_compensations = 0;
 }
 
 void add_lag_comp_ent(CBaseEntity@ ent) {
@@ -257,7 +282,7 @@ void debug_rewind(CBaseMonster@ mon, EntState lastState) {
 	g_Scheduler.SetTimeout("delay_kill", 1.0f, EHandle(oldEnt));
 }
 
-int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
+void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 	int iping;
 	
 	if (state.adjustMode == ADJUST_NONE) {
@@ -283,54 +308,66 @@ int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		float scale = (1.0f / MAX_LAG_COMPENSATION_TIME);
 		int rate = int((g_state_count / laggyEnts.size())*scale);
 		g_PlayerFuncs.PrintKeyBindingString(plr, shift + "Compensation: " + iping + " ms\n" + 
-			"Replay FPS: " + rate);
+			"Replay FPS: " + rate + "\nRPS: " + g_stat_rps + ", " + g_stat_comps + "\nTracked Ents: " + laggyEnts.size());
 	}
 	
 	float ping = float(iping) / 1000.0f;
 	float shootTime = g_Engine.time - ping;
-	
-	int rewind_count = 0;
+
+	int bestHistoryIdx = 0;
+	float t = 0;
 
 	for (uint i = 0; i < laggyEnts.size(); i++) {
-		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
-		if (mon is null or mon.entindex() == plr.entindex()) {
+		
+		LagEnt@ lagEnt = laggyEnts[i];
+		CBaseMonster@ mon = cast<CBaseMonster@>(lagEnt.h_ent.GetEntity());
+		
+		if (mon is null) {
 			continue;
 		}
-		
-		rewind_count++;
+		if (!lagEnt.hasEnoughHistory || mon.entindex() == plr.entindex()) {
+			//println("Not enough history for monster");
+			continue;
+		}
+
+		g_rewind_count++;
 		
 		// get state closest to the time the player shot
-		int bestHistoryIdx = 0;
-		
-		for (uint k = 0; k < laggyEnts[i].history.size(); k++) {
-			if (laggyEnts[i].history[k].time >= shootTime || k == laggyEnts[i].history.size()-1) {
-				bestHistoryIdx = k;
-				//println("Best delta: " + int((laggyEnts[i].history[k].time - shootTime)*1000) + " for ping " + iping);
-				break;
+		if (bestHistoryIdx == 0) {
+			for (uint k = 0; k < laggyEnts[i].history.size(); k++) {
+				if (lagEnt.history[k].time >= shootTime || k == lagEnt.history.size()-1) {
+					bestHistoryIdx = k;
+					
+					// interpolate between states to get the exact position the monster was in when the player shot
+					// this probably won't matter much unless the server framerate is really low.
+					EntState@ newState = lagEnt.history[bestHistoryIdx]; // later than shoot time
+					EntState@ oldState = lagEnt.history[bestHistoryIdx-1]; // earlier than shoot time	
+					
+					t = (shootTime - oldState.time) / (newState.time - oldState.time);
+					
+					//println("Best delta: " + int((laggyEnts[i].history[k].time - shootTime)*1000) + " for ping " + iping);
+					break;
+				}
+			}
+			
+			if (bestHistoryIdx == 0) {
+				continue;
 			}
 		}
 		
-		if (bestHistoryIdx == 0) {
-			continue;
-		}
+		lagEnt.isRewound = true;		
+		lagEnt.currentState.origin = mon.pev.origin;
+		lagEnt.currentState.angles = mon.pev.angles;
+		lagEnt.currentState.sequence = mon.pev.sequence;
+		lagEnt.currentState.frame = mon.pev.frame;
 		
-		laggyEnts[i].isRewound = true;
-		laggyEnts[i].currentState.origin = mon.pev.origin;
-		laggyEnts[i].currentState.sequence = mon.pev.sequence;
-		laggyEnts[i].currentState.frame = mon.pev.frame;
-		laggyEnts[i].currentState.angles = mon.pev.angles;
-		
-		EntState newState = laggyEnts[i].history[bestHistoryIdx]; // later than shoot time
-		EntState oldState = laggyEnts[i].history[bestHistoryIdx-1]; // earlier than shoot time		
-		
-		// interpolate between states to get the exact position the monster was in when the player shot
-		// this probably won't matter much unless the server framerate is really low.
-		float t = (shootTime - oldState.time) / (newState.time - oldState.time);
+		EntState@ newState = lagEnt.history[bestHistoryIdx]; // later than shoot time
+		EntState@ oldState = lagEnt.history[bestHistoryIdx-1]; // earlier than shoot time		
 
 		mon.pev.sequence = t >= 0.5f ? newState.sequence : oldState.sequence;
 		mon.pev.frame = oldState.frame + (newState.frame - oldState.frame)*t;
 		mon.pev.angles = t >= 0.5f ? newState.angles : oldState.angles;
-		g_EntityFuncs.SetOrigin(mon, oldState.origin + (newState.origin - oldState.origin)*t);
+		mon.pev.origin = oldState.origin + (newState.origin - oldState.origin)*t;
 		
 		mon.m_LastHitGroup = -1337; // special value to indicate the monster was NOT hit by the player
 		
@@ -340,36 +377,34 @@ int rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 			tweenState.sequence = mon.pev.sequence;
 			tweenState.frame = mon.pev.frame;
 			tweenState.angles = mon.pev.angles;
-			laggyEnts[i].debugState = tweenState;
+			lagEnt.debugState = tweenState;
 		}
 	}
-	
-	return rewind_count;
 }
 
 CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
 	CBaseEntity@ hitTarget = null;
 	
 	for (uint i = 0; i < laggyEnts.size(); i++) {
-		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
-		if (!laggyEnts[i].isRewound or mon is null) {
+		LagEnt@ lagEnt = laggyEnts[i];
+		CBaseMonster@ mon = cast<CBaseMonster@>(lagEnt.h_ent.GetEntity());
+		if (!lagEnt.isRewound or mon is null) {
 			continue;
 		}
-		
+
 		// move back to current position
-		g_EntityFuncs.SetOrigin(mon, laggyEnts[i].currentState.origin);
-		mon.pev.sequence = laggyEnts[i].currentState.sequence;
-		mon.pev.frame = laggyEnts[i].currentState.frame;
-		mon.pev.angles = laggyEnts[i].currentState.angles;
+		mon.pev.origin = lagEnt.currentState.origin;
+		mon.pev.sequence = lagEnt.currentState.sequence;
+		mon.pev.frame = lagEnt.currentState.frame;
+		mon.pev.angles = lagEnt.currentState.angles;
 		
-		laggyEnts[i].isRewound = false;
+		lagEnt.isRewound = false;
 		
 		if (state.debug > 1 && didShoot) {
-			debug_rewind(mon, laggyEnts[i].debugState);
+			debug_rewind(mon, lagEnt.debugState);
 		}
 		
 		if (mon.m_LastHitGroup != -1337) {
-			println("HIT? " + mon.m_LastHitGroup);
 			//hits++;
 			@hitTarget = @mon;
 		}
@@ -421,42 +456,93 @@ HookReturnCode ClientJoin(CBasePlayer@ plr)
 	return HOOK_CONTINUE;
 }
 
-HookReturnCode PlayerPreThink(CBasePlayer@ plr, uint&out test) {
+int g_compensations = 0;
+int playerPostThinkAmmo = 0;
+const int ANY_ATTACK_KEY = IN_ATTACK | IN_ATTACK2;
+bool playerWasCompensated = false;
+
+bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
+	if (plr.m_flNextAttack > 0)
+		return false;
+
+	int buttons = plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonReleased;
+	bool primaryFire = buttons & IN_ATTACK != 0;
+	bool secondaryFire = buttons & IN_ATTACK2 != 0;
+	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
+	bool hasSecondaryAmmo = wep.m_iClip2 > 0;
+	bool primaryFireIsNow = wep.m_flNextPrimaryAttack <= 0;
+	
+	if (wep.pev.classname == "weapon_9mmhandgun") {
+		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && (primaryFire || secondaryFire);
+	}
+	else if (wep.pev.classname == "weapon_9mmAR") {
+		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !secondaryFire;
+	}
+	else if (wep.pev.classname == "weapon_uzi" && wep.m_fIsAkimbo) {
+		return (hasPrimaryAmmo || hasSecondaryAmmo) && primaryFireIsNow && !wep.m_fInReload;
+	}
+	else if (wep.pev.classname == "weapon_gauss") {		
+		if ((plr.m_afButtonPressed & IN_ATTACK2) == 0 && (lastPlrButtons[plr.entindex()] & IN_ATTACK2) != 0) {
+			return true;
+		} else {
+			return primaryFire && !secondaryFire && hasPrimaryAmmo && plr.pev.waterlevel != 3;
+		}
+	}
+	else if (wep.pev.classname == "weapon_egon") {
+		return hasPrimaryAmmo && (primaryFire && !secondaryFire) && wep.pev.dmgtime < g_Engine.time && wep.m_flNextPrimaryAttack < g_Engine.time;
+	}
+	
+	return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && plr.pev.waterlevel != 3;
+}
+
+// called before weapon shoot code
+HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	if (!g_enabled) {
 		return HOOK_CONTINUE;
 	}
 	
-	return HOOK_CONTINUE;
-}
-
-int playerPostThinkAmmo = 0;
-
-// called before weapon primary fire code for a single player
-HookReturnCode PlayerPostThink(CBasePlayer@ plr) {		
+	playerWasCompensated = false;
+	
 	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-	if (wep !is null) {
-		playerPostThinkAmmo = wep.m_iClip;
+	if (wep !is null && !g_no_compensate_weapons.exists(wep.pev.classname)) {		
+		//println("" + wep.m_flTimeWeaponIdle);
+	
+		if (can_weapon_fire(plr, wep)) {
+			//println("COMPENSATE " + g_Engine.time);
+			playerWasCompensated = true;
+			g_compensations++;
+			
+			playerPostThinkAmmo = wep.m_iClip;
+			PlayerState@ state = getPlayerState(plr);
+			rewind_monsters(plr, state);
+		}
 		
-		PlayerState@ state = getPlayerState(plr);
-		rewind_monsters(plr, state);
+		lastPlrButtons[plr.entindex()] = plr.m_afButtonPressed;
 	}
 	
 	return HOOK_CONTINUE;
 }
 
-// called after weapon primary fire code for a single player
+// called after weapon shoot code
 HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags )
-{	
-	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-	if (wep !is null) {
-		PlayerState@ state = getPlayerState(plr);
-		
-		bool didPlayerShoot = wep.m_iClip != playerPostThinkAmmo;
-		
-		CBaseEntity@ hitTarget = undo_rewind_monsters(state, didPlayerShoot);
-		if (state.hitmarker && hitTarget !is null) {
-			show_hit_marker(plr, hitTarget);
-		}
+{
+	if (!g_enabled || !playerWasCompensated) {
+		return HOOK_CONTINUE;
 	}
+	
+	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+	if (wep is null) {
+		return HOOK_CONTINUE;
+	}
+	
+	PlayerState@ state = getPlayerState(plr);
+	
+	bool didPlayerShoot = wep.m_iClip != playerPostThinkAmmo;
+	
+	CBaseEntity@ hitTarget = undo_rewind_monsters(state, didPlayerShoot);
+	if (state.hitmarker && hitTarget !is null) {
+		show_hit_marker(plr, hitTarget);
+	}
+	
 	return HOOK_CONTINUE;
 }
