@@ -11,6 +11,7 @@
 // - compensate moving platforms somehow?
 // - compensate moving breakable solids and/or buttons
 // - custom weapon support?
+// - double shotgun compensated while reloading
 
 // unfixable bugs:
 // - blood effect shows in the unlagged position
@@ -33,6 +34,8 @@ int g_rewind_count = 0;
 int g_stat_rps = 0;
 int g_stat_comps = 0;
 array<int> lastPlrButtons; // player button properties dont't work right for secondary/tertiary fire
+array<float> lastM16Delay1; // hack to figure out when the m16 will fire next
+array<float> lastM16Delay2; // hack to figure out when the m16 will fire next
 
 enum AdjustModes {
 	ADJUST_NONE, // use ping value
@@ -45,11 +48,12 @@ class PlayerState {
 	// player handles and cause weird bugs or break states entirely. Check if disconnect is called
 	// if player leaves during level change.
 
-	bool enabled = false;
+	bool enabled = true;
 	int compensation = 0;
 	int adjustMode = 0;
 	int debug = 0;
 	bool hitmarker = true;
+	bool perfDebug = false; // show performance stats
 }
 
 class EntState {
@@ -64,6 +68,8 @@ class LagEnt {
 	EHandle h_ent;
 	
 	EntState currentState; // only updated on shoots
+	float currentHealth; // used to detect if player shot this monster
+	
 	EntState debugState; // used to display a debug model when a player shoots
 	array<EntState> history;
 	bool isRewound = false;
@@ -105,6 +111,8 @@ void PluginInit()  {
 	g_Module.ScriptInfo.SetContactInfo( "https://github.com/wootguy" );
 	
 	lastPlrButtons.resize(33);
+	lastM16Delay1.resize(33);
+	lastM16Delay2.resize(33);
 	
 	g_Hooks.RegisterHook( Hooks::Player::ClientSay, @ClientSay );
 	g_Hooks.RegisterHook( Hooks::Weapon::WeaponPrimaryAttack, @WeaponPrimaryAttack );
@@ -231,7 +239,7 @@ void cleanup_ents() {
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
 		
-		if (mon is null) {
+		if (mon is null or mon.pev.deadflag != DEAD_NO) {
 			continue;
 		}
 		
@@ -308,7 +316,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		float scale = (1.0f / MAX_LAG_COMPENSATION_TIME);
 		int rate = int((g_state_count / laggyEnts.size())*scale);
 		g_PlayerFuncs.PrintKeyBindingString(plr, shift + "Compensation: " + iping + " ms\n" + 
-			"Replay FPS: " + rate + "\nRPS: " + g_stat_rps + ", " + g_stat_comps + "\nTracked Ents: " + laggyEnts.size());
+			"Replay FPS: " + rate);
 	}
 	
 	float ping = float(iping) / 1000.0f;
@@ -360,6 +368,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		lagEnt.currentState.angles = mon.pev.angles;
 		lagEnt.currentState.sequence = mon.pev.sequence;
 		lagEnt.currentState.frame = mon.pev.frame;
+		lagEnt.currentHealth = mon.pev.health;
 		
 		EntState@ newState = lagEnt.history[bestHistoryIdx]; // later than shoot time
 		EntState@ oldState = lagEnt.history[bestHistoryIdx-1]; // earlier than shoot time		
@@ -368,8 +377,8 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		mon.pev.frame = oldState.frame + (newState.frame - oldState.frame)*t;
 		mon.pev.angles = t >= 0.5f ? newState.angles : oldState.angles;
 		mon.pev.origin = oldState.origin + (newState.origin - oldState.origin)*t;
-		
-		mon.m_LastHitGroup = -1337; // special value to indicate the monster was NOT hit by the player
+
+		mon.m_LastHitGroup = -1337; // for detecting hits on things that don't take damage from bullets (garg)
 		
 		if (state.debug > 1) {
 			EntState tweenState;
@@ -404,7 +413,7 @@ CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
 			debug_rewind(mon, lagEnt.debugState);
 		}
 		
-		if (mon.m_LastHitGroup != -1337) {
+		if (mon.pev.health < lagEnt.currentHealth || mon.m_LastHitGroup != -1337) {
 			//hits++;
 			@hitTarget = @mon;
 		}
@@ -452,13 +461,17 @@ HookReturnCode EntityCreated(CBaseEntity@ ent){
 
 HookReturnCode ClientJoin(CBasePlayer@ plr)
 {
+	PlayerState@ state = getPlayerState(plr);
+	if (state.perfDebug) {
+		debug_perf(EHandle(plr));
+	}
+	
 	add_lag_comp_ent(plr);
 	return HOOK_CONTINUE;
 }
 
 int g_compensations = 0;
 int playerPostThinkAmmo = 0;
-const int ANY_ATTACK_KEY = IN_ATTACK | IN_ATTACK2;
 bool playerWasCompensated = false;
 
 bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
@@ -471,28 +484,48 @@ bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
 	bool hasSecondaryAmmo = wep.m_iClip2 > 0;
 	bool primaryFireIsNow = wep.m_flNextPrimaryAttack <= 0;
+	bool inWater = plr.pev.waterlevel == 3;
 	
 	if (wep.pev.classname == "weapon_9mmhandgun") {
 		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && (primaryFire || secondaryFire);
 	}
 	else if (wep.pev.classname == "weapon_9mmAR") {
-		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !secondaryFire;
+		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !secondaryFire && !inWater;
+	}
+	else if (wep.pev.classname == "weapon_shotgun") {
+		bool firing = (primaryFire && primaryFireIsNow) || (secondaryFire && wep.m_flNextSecondaryAttack <= 0);
+		return hasPrimaryAmmo && !wep.m_fInReload && firing && !inWater;
+	}
+	else if (wep.pev.classname == "weapon_m16") {
+		// will fire this frame if primary delay goes positive (bullet 1)
+		// or if secondary delay goes positive after the first bullet (bullet 2+3)
+		bool shotFirstBullet = primaryFire && wep.m_flNextPrimaryAttack >= 0 && lastM16Delay1[plr.entindex()] < 0;
+		bool shotBurstBullet = wep.m_flNextSecondaryAttack < 0 && lastM16Delay2[plr.entindex()] >= 0 && wep.m_flNextPrimaryAttack > 0.2f;
+		bool firing = shotFirstBullet || shotBurstBullet;
+
+		lastM16Delay1[plr.entindex()] = wep.m_flNextPrimaryAttack;
+		lastM16Delay2[plr.entindex()] = wep.m_flNextSecondaryAttack;
+		
+		return hasPrimaryAmmo && firing && !wep.m_fInReload && !secondaryFire && !inWater;
 	}
 	else if (wep.pev.classname == "weapon_uzi" && wep.m_fIsAkimbo) {
-		return (hasPrimaryAmmo || hasSecondaryAmmo) && primaryFireIsNow && !wep.m_fInReload;
+		return primaryFire && (hasPrimaryAmmo || hasSecondaryAmmo) && primaryFireIsNow && !wep.m_fInReload && !inWater;
 	}
 	else if (wep.pev.classname == "weapon_gauss") {		
 		if ((plr.m_afButtonPressed & IN_ATTACK2) == 0 && (lastPlrButtons[plr.entindex()] & IN_ATTACK2) != 0) {
-			return true;
+			return !inWater;
 		} else {
-			return primaryFire && !secondaryFire && hasPrimaryAmmo && plr.pev.waterlevel != 3;
+			return primaryFire && !secondaryFire && hasPrimaryAmmo && !inWater;
 		}
 	}
 	else if (wep.pev.classname == "weapon_egon") {
-		return hasPrimaryAmmo && (primaryFire && !secondaryFire) && wep.pev.dmgtime < g_Engine.time && wep.m_flNextPrimaryAttack < g_Engine.time;
+		return hasPrimaryAmmo && (primaryFire && !secondaryFire) && wep.pev.dmgtime < g_Engine.time && wep.m_flNextPrimaryAttack < g_Engine.time && !inWater;
+	} else if (wep.pev.classname == "weapon_shockrifle") {
+		float nextDmg = wep.pev.dmgtime - g_Engine.time;
+		return hasPrimaryAmmo && wep.m_flNextSecondaryAttack <= 0 && secondaryFire && nextDmg < 0 && !inWater;
 	}
 	
-	return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && plr.pev.waterlevel != 3;
+	return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !inWater;
 }
 
 // called before weapon shoot code
@@ -504,8 +537,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	playerWasCompensated = false;
 	
 	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-	if (wep !is null && !g_no_compensate_weapons.exists(wep.pev.classname)) {		
-		//println("" + wep.m_flTimeWeaponIdle);
+	if (wep !is null && !g_no_compensate_weapons.exists(wep.pev.classname)) {
 	
 		if (can_weapon_fire(plr, wep)) {
 			//println("COMPENSATE " + g_Engine.time);
@@ -524,8 +556,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 }
 
 // called after weapon shoot code
-HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags )
-{
+HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 	if (!g_enabled || !playerWasCompensated) {
 		return HOOK_CONTINUE;
 	}
