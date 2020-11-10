@@ -5,6 +5,8 @@
 // TODO:
 // - auto-enable for high pings?
 // - global history timestep
+// - update PVS of player and only rewind ents near them?
+// no tic for no damage osprey
 
 // minor todo:
 // - compensate moving platforms somehow?
@@ -15,7 +17,7 @@
 // unfixable bugs:
 // - blood effect shows in the unlagged position
 
-const float MAX_LAG_COMPENSATION_TIME = 2.0f; // 2 seconds
+const float MAX_LAG_COMPENSATION_SECONDS = 1.0f; // don't set too high or else newly spawned monsters take too long to be compensated
 const string hitmarker_spr = "sprites/misc/mlg.spr";
 const string hitmarker_snd = "misc/hitmarker.mp3";
 
@@ -51,7 +53,7 @@ class PlayerState {
 	int compensation = 0;
 	int adjustMode = 0;
 	int debug = 0;
-	bool hitmarker = false;
+	bool hitmarker = true;
 	bool perfDebug = false; // show performance stats
 }
 
@@ -96,7 +98,7 @@ class LagEnt {
 		
 		history.insertLast(state);
 		
-		while (history[0].time < g_Engine.time - MAX_LAG_COMPENSATION_TIME) {
+		while (history[0].time < g_Engine.time - MAX_LAG_COMPENSATION_SECONDS) {
 			history.removeAt(0);
 			hasEnoughHistory = true;
 		}
@@ -186,7 +188,7 @@ void stop_polling() {
 	@cleanup_interval = null;
 }
 
-void late_init() {		
+void late_init() {
 	reload_ents();
 	start_polling();
 }
@@ -236,7 +238,7 @@ void cleanup_ents() {
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
 		
-		if (mon is null or mon.pev.deadflag != DEAD_NO) {
+		if (mon is null or (mon.pev.deadflag != DEAD_NO && !mon.IsPlayer())) {
 			continue;
 		}
 		
@@ -310,7 +312,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 	
 	if (state.debug > 0 && laggyEnts.size() > 0) {
 		string shift = "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
-		float scale = (1.0f / MAX_LAG_COMPENSATION_TIME);
+		float scale = (1.0f / MAX_LAG_COMPENSATION_SECONDS);
 		int rate = int((g_state_count / laggyEnts.size())*scale);
 		g_PlayerFuncs.PrintKeyBindingString(plr, shift + "Compensation: " + iping + " ms\n" + 
 			"Replay FPS: " + rate);
@@ -410,7 +412,7 @@ CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
 			debug_rewind(mon, lagEnt.debugState);
 		}
 		
-		if (mon.pev.health < lagEnt.currentHealth || mon.m_LastHitGroup != -1337) {
+		if (mon.pev.health < lagEnt.currentHealth || (mon.m_LastHitGroup != -1337 && mon.IsPlayer())) {
 			//hits++;
 			@hitTarget = @mon;
 		}
@@ -464,7 +466,11 @@ int playerPostThinkAmmo = 0;
 bool playerWasCompensated = false;
 
 // will the weapon fire this frame?
-bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {		
+bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
+	if (!plr.IsAlive()) {
+		return false;
+	}
+	
 	if (g_CustomEntityFuncs.IsCustomEntity(wep.pev.classname)) {
 		return can_custom_weapon_fire(plr, wep);
 	}
