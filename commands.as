@@ -203,7 +203,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 						arg = arg.SubString(1);
 					}
 					
-					int amt = Math.min(atoi(arg), int(MAX_LAG_COMPENSATION_TIME*1000));
+					int amt = Math.min(atoi(arg), int(MAX_LAG_COMPENSATION_SECONDS*1000));
 					if (amt < -1) {
 						amt = -1;
 					}
@@ -220,7 +220,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 					}
 				}				
 			} else {
-				int maxComp = int(MAX_LAG_COMPENSATION_TIME*1000);
+				int maxComp = int(MAX_LAG_COMPENSATION_SECONDS*1000);
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '-----------------------------Lag Compensation Commands-----------------------------\n\n');
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, 'Lag compensation "rewinds" enemies so that you don\'t have to aim ahead of them to get a hit.\n');
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nType ".lagc [on/off/toggle]" to enable or disable lag compensation.\n');
