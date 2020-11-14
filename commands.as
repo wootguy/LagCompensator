@@ -108,6 +108,13 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 	
 	if ( args.ArgC() > 0 )
 	{
+		/*
+		if (args[0][0] == 'y') {
+			compensate_func_rotating(plr);
+			return true;
+		}
+		*/
+				
 		if (args[0] == ".lagc") {
 			if (args.ArgC() > 1) {
 				string arg = args[1];
@@ -239,8 +246,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        The net_graph ping might be more accurate than the scoreboard.\n');
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        To turn on net_graph, type \'net_graph 2\' in this console.\n');
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc x" to toggle hit confirmations.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        This will make it obvious when you hit a target. Blood effects\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        are unreliable due to how this plugin works.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        This will make it obvious when you hit a target.\n');
 				
 				if (isAdmin) {
 					g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '\nAdmins only:');
