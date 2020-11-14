@@ -6,10 +6,7 @@
 // - auto-enable for high pings?
 // - global history timestep
 // - update PVS of player and only rewind ents near them?
-// no tic for no damage osprey
 // - rewind breakables/doors for clickies
-// -underwater pistol not always compesnated? (sa13h)
-// FINISHING BLOW DOESNT COUNT 357 crazyteleport
 
 // minor todo:
 // - compensate moving platforms somehow?
@@ -106,6 +103,7 @@ class LagEnt {
 	
 	EntState currentState; // only updated on shoots
 	float currentHealth; // used to detect if player shot this monster
+	int currentDeadFlag;
 	
 	EntState debugState; // used to display a debug model when a player shoots
 	array<EntState> history;
@@ -301,7 +299,7 @@ void cleanup_ents() {
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		CBaseEntity@ mon = laggyEnts[i].h_ent.GetEntity();
 		
-		if (mon is null or (mon.pev.deadflag != DEAD_NO && !mon.IsPlayer())) {
+		if (mon is null) {
 			continue;
 		}
 		
@@ -376,7 +374,6 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 	}
 
 	int bestHistoryIdx = 0;
-	float t = 0;
 
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		
@@ -386,27 +383,23 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		if (mon is null) {
 			continue;
 		}
-		if (!lagEnt.hasEnoughHistory || mon.entindex() == plr.entindex()) {
+		if (lagEnt.history.size() == 0 || mon.entindex() == plr.entindex() || mon.pev.deadflag != DEAD_NO) {
 			//println("Not enough history for monster");
 			continue;
 		}
 
 		g_rewind_count++;
+		int useHistoryIdx = bestHistoryIdx;
 		
 		// get state closest to the time the player shot
-		if (bestHistoryIdx == 0) {
-			for (uint k = 0; k < laggyEnts[i].history.size(); k++) {
+		if (bestHistoryIdx == 0 || !lagEnt.hasEnoughHistory) {
+			for (uint k = 0; k < lagEnt.history.size(); k++) {
 				if (lagEnt.history[k].time >= shootTime || k == lagEnt.history.size()-1) {
-					bestHistoryIdx = k;
-					
-					// interpolate between states to get the exact position the monster was in when the player shot
-					// this probably won't matter much unless the server framerate is really low.
-					EntState@ newState = lagEnt.history[bestHistoryIdx]; // later than shoot time
-					EntState@ oldState = lagEnt.history[bestHistoryIdx-1]; // earlier than shoot time	
-					
-					t = (shootTime - oldState.time) / (newState.time - oldState.time);
-					
-					//println("Best delta: " + int((laggyEnts[i].history[k].time - shootTime)*1000) + " for ping " + iping);
+					useHistoryIdx = k;
+					if (lagEnt.hasEnoughHistory) {
+						bestHistoryIdx = k; // use this for all other monsters that have enough history
+					}
+					//println("Best delta: " + int((lagEnt.history[k].time - shootTime)*1000) + " for ping " + iping);
 					break;
 				}
 			}
@@ -422,9 +415,13 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		lagEnt.currentState.sequence = mon.pev.sequence;
 		lagEnt.currentState.frame = mon.pev.frame;
 		lagEnt.currentHealth = mon.pev.health;
+		lagEnt.currentDeadFlag = mon.pev.deadflag;
 		
+		// interpolate between states to get the exact position the monster was in when the player shot
+		// this probably won't matter much unless the server framerate is really low.
 		EntState@ newState = lagEnt.history[bestHistoryIdx]; // later than shoot time
-		EntState@ oldState = lagEnt.history[bestHistoryIdx-1]; // earlier than shoot time		
+		EntState@ oldState = lagEnt.history[bestHistoryIdx-1]; // earlier than shoot time
+		float t = (shootTime - oldState.time) / (newState.time - oldState.time);
 
 		mon.pev.sequence = t >= 0.5f ? newState.sequence : oldState.sequence;
 		mon.pev.frame = oldState.frame + (newState.frame - oldState.frame)*t;
@@ -480,7 +477,7 @@ CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
 			debug_rewind(mon, lagEnt.debugState);
 		}
 		
-		if (ent.pev.health != lagEnt.currentHealth) {
+		if (ent.pev.health != lagEnt.currentHealth || ent.pev.deadflag != lagEnt.currentDeadFlag) {
 			//hits++;
 			@hitTarget = @ent;
 		}
@@ -495,7 +492,6 @@ CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
 			if (ent.pev.health != hitmarkEnts[i].currentHealth) {
 				//hits++;
 				@hitTarget = @ent;
-				println("HIT " + ent.pev.classname + " " + hitmarkEnts[i].currentHealth + " " + ent.pev.health);
 			}
 		}
 	}
@@ -622,7 +618,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	if (wep !is null && !g_no_compensate_weapons.exists(wep.pev.classname)) {
 
 		if (will_weapon_fire_this_frame(plr, wep)) {
-			println("COMPENSATE " + g_Engine.time);
+			//println("COMPENSATE " + g_Engine.time);
 			playerWasCompensated = true;
 			g_compensations++;
 			
