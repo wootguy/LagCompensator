@@ -1,3 +1,4 @@
+#include "platforms"
 #include "custom_weapons"
 #include "commands"
 #include "util"
@@ -7,12 +8,22 @@
 // - global history timestep
 // - update PVS of player and only rewind ents near them?
 // no tic for no damage osprey
+// - rewind breakables/doors for clickies
+// -underwater pistol not always compesnated? (sa13h)
+// FINISHING BLOW DOESNT COUNT 357 crazyteleport
 
 // minor todo:
 // - compensate moving platforms somehow?
 // - compensate moving breakable solids and/or buttons
 // - custom weapon support for all maps and plugins (ohgod)
 // - double shotgun compensated while reloading
+
+// Ping colors:
+// <75 = green
+// 76+ = pale green
+// 151+ = yellow
+// 251+ = orange
+// 401+ = red
 
 // unfixable bugs:
 // - blood effect shows in the unlagged position
@@ -53,8 +64,33 @@ class PlayerState {
 	int compensation = 0;
 	int adjustMode = 0;
 	int debug = 0;
-	bool hitmarker = true;
+	bool hitmarker = false;
 	bool perfDebug = false; // show performance stats
+	
+	// get ping time in seconds
+	float getCompensationPing(CBasePlayer@ plr) {
+		int iping;
+		
+		if (adjustMode == ADJUST_NONE) {
+			if (compensation > 0) {
+				iping = compensation;
+			} else {
+				int packetLoss;
+				g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
+			}
+		} else {
+			int packetLoss;
+			g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
+				
+			if (adjustMode == ADJUST_ADD) {
+				iping += compensation;
+			} else {
+				iping -= compensation;
+			}
+		}
+		
+		return float(iping) / 1000.0f;
+	}
 }
 
 class EntState {
@@ -143,6 +179,7 @@ void PluginInit()  {
 	
 	if (g_Engine.time > 4) { // plugin reloaded mid-map?
 		late_init();
+		//kill_compensated_rotating_ents();
 	}
 	
 	g_no_compensate_weapons["weapon_crowbar"] = true;
@@ -159,12 +196,17 @@ void PluginInit()  {
 	g_no_compensate_weapons["weapon_displacer"] = true;
 	
 	g_Scheduler.SetInterval("rewind_stats", 1.0f, -1);
+	//g_Scheduler.SetInterval("simplify_deltas", 0.0f, -1);
+	//delete_test_ents();
+	
 }
 
 void MapInit() {
 	g_Game.PrecacheModel(hitmarker_spr);
 	g_SoundSystem.PrecacheSound(hitmarker_snd);
 	g_Game.PrecacheGeneric("sound/" + hitmarker_snd);
+	
+	//svc_packetentities();
 }
 
 void MapActivate() {	
@@ -290,36 +332,16 @@ void debug_rewind(CBaseMonster@ mon, EntState lastState) {
 }
 
 void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
-	int iping;
-	
-	if (state.adjustMode == ADJUST_NONE) {
-		if (state.compensation > 0) {
-			iping = state.compensation;
-		} else {
-			int packetLoss;
-			g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
-		}
-	} else {
-		int packetLoss;
-		g_EngineFuncs.GetPlayerStats(plr.edict(), iping, packetLoss);
-			
-		if (state.adjustMode == ADJUST_ADD) {
-			iping += state.compensation;
-		} else {
-			iping -= state.compensation;
-		}
-	}
-	
+	float ping = state.getCompensationPing(plr);
+	float shootTime = g_Engine.time - ping;
+
 	if (state.debug > 0 && laggyEnts.size() > 0) {
 		string shift = "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n";
 		float scale = (1.0f / MAX_LAG_COMPENSATION_SECONDS);
 		int rate = int((g_state_count / laggyEnts.size())*scale);
-		g_PlayerFuncs.PrintKeyBindingString(plr, shift + "Compensation: " + iping + " ms\n" + 
+		g_PlayerFuncs.PrintKeyBindingString(plr, shift + "Compensation: " + int(ping*1000) + " ms\n" + 
 			"Replay FPS: " + rate);
 	}
-	
-	float ping = float(iping) / 1000.0f;
-	float shootTime = g_Engine.time - ping;
 
 	int bestHistoryIdx = 0;
 	float t = 0;
@@ -412,7 +434,7 @@ CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
 			debug_rewind(mon, lagEnt.debugState);
 		}
 		
-		if (mon.pev.health < lagEnt.currentHealth || (mon.m_LastHitGroup != -1337 && mon.IsPlayer())) {
+		if (mon.pev.health != lagEnt.currentHealth || (mon.m_LastHitGroup != -1337 && mon.IsPlayer())) {
 			//hits++;
 			@hitTarget = @mon;
 		}
@@ -465,14 +487,13 @@ int g_compensations = 0;
 int playerPostThinkAmmo = 0;
 bool playerWasCompensated = false;
 
-// will the weapon fire this frame?
-bool can_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
-	if (!plr.IsAlive()) {
+bool will_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
+	if (!plr.IsAlive() || plr.m_hTank.IsValid()) {
 		return false;
 	}
 	
 	if (g_CustomEntityFuncs.IsCustomEntity(wep.pev.classname)) {
-		return can_custom_weapon_fire(plr, wep);
+		return will_custom_weapon_fire_this_frame(plr, wep);
 	}
 	
 	if (plr.m_flNextAttack > 0)
@@ -539,9 +560,9 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	
 	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
 	if (wep !is null && !g_no_compensate_weapons.exists(wep.pev.classname)) {
-	
-		if (can_weapon_fire(plr, wep)) {
-			//println("COMPENSATE " + g_Engine.time);
+
+		if (will_weapon_fire_this_frame(plr, wep)) {
+			println("COMPENSATE " + g_Engine.time);
 			playerWasCompensated = true;
 			g_compensations++;
 			
@@ -557,7 +578,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 }
 
 // called after weapon shoot code
-HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
+HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {	
 	if (!g_enabled || !playerWasCompensated) {
 		return HOOK_CONTINUE;
 	}

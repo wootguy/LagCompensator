@@ -10,14 +10,13 @@
 // The PlayerPostThink Hook has a debug message commented out that will tell you exactly when a bullet was compensated.
 // Sometimes things like holding both mouse buttons or reloading will trigger compensation when it shouldn't.
 
-// This function should return true if a custom weapon is going to shoot in the current frame
-bool can_custom_weapon_fire(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
+bool will_custom_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 	int buttons = plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonReleased;
 	bool primaryFirePressed = buttons & IN_ATTACK != 0;
 	bool secondaryFirePressed = buttons & IN_ATTACK2 != 0;
 	bool inWater = plr.pev.waterlevel == 3;
-	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
-	bool hasSecondaryAmmo = wep.m_iClip2 > 0 || (wep.m_iClip2 == -1 && plr.m_rgAmmo( wep.m_iSecondaryAmmoType ) > 0);
+	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && wep.m_iPrimaryAmmoType != -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
+	bool hasSecondaryAmmo = wep.m_iClip2 > 0 || (wep.m_iClip2 == -1 && wep.m_iSecondaryAmmoType != -1 && plr.m_rgAmmo( wep.m_iSecondaryAmmoType ) > 0);
 	string weaponName = wep.pev.classname;
 	
 	// primary/secondary fire hooks going to be called this frame?
