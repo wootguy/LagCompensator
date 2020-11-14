@@ -107,14 +107,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 	bool isAdmin = g_PlayerFuncs.AdminLevel(plr) >= ADMIN_YES;
 	
 	if ( args.ArgC() > 0 )
-	{
-		/*
-		if (args[0][0] == 'y') {
-			compensate_func_rotating(plr);
-			return true;
-		}
-		*/
-				
+	{				
 		if (args[0] == ".lagc") {
 			if (args.ArgC() > 1) {
 				string arg = args[1];

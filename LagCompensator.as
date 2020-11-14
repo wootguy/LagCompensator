@@ -1,4 +1,3 @@
-#include "platforms"
 #include "custom_weapons"
 #include "commands"
 #include "util"
@@ -179,7 +178,6 @@ void PluginInit()  {
 	
 	if (g_Engine.time > 4) { // plugin reloaded mid-map?
 		late_init();
-		//kill_compensated_rotating_ents();
 	}
 	
 	g_no_compensate_weapons["weapon_crowbar"] = true;
@@ -196,8 +194,6 @@ void PluginInit()  {
 	g_no_compensate_weapons["weapon_displacer"] = true;
 	
 	g_Scheduler.SetInterval("rewind_stats", 1.0f, -1);
-	//g_Scheduler.SetInterval("simplify_deltas", 0.0f, -1);
-	//delete_test_ents();
 	
 }
 
@@ -205,8 +201,6 @@ void MapInit() {
 	g_Game.PrecacheModel(hitmarker_spr);
 	g_SoundSystem.PrecacheSound(hitmarker_snd);
 	g_Game.PrecacheGeneric("sound/" + hitmarker_snd);
-	
-	//svc_packetentities();
 }
 
 void MapActivate() {	
