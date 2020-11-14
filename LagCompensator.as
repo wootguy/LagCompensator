@@ -36,6 +36,7 @@ CScheduledFunction@ cleanup_interval = null;
 array<LagEnt> laggyEnts; // ents that are lag compensated
 array<HitmarkEnt> hitmarkEnts; // ents that show hitmarkers but aren't lag compensated
 dictionary g_monster_blacklist; // don't track these - waste of time
+dictionary g_custom_hitmark_ents;
 dictionary g_player_states;
 dictionary g_no_compensate_weapons; // skip compensating these weapons to improve performance
 int g_state_count = 0;
@@ -45,6 +46,7 @@ int g_stat_comps = 0;
 array<int> lastPlrButtons; // player button properties dont't work right for secondary/tertiary fire
 array<float> lastM16Delay1; // hack to figure out when the m16 will fire next
 array<float> lastM16Delay2; // hack to figure out when the m16 will fire next
+array<float> g_lastAttack; // for weapon cooldowns
 
 enum AdjustModes {
 	ADJUST_NONE, // use ping value
@@ -159,6 +161,7 @@ void PluginInit()  {
 	lastPlrButtons.resize(33);
 	lastM16Delay1.resize(33);
 	lastM16Delay2.resize(33);
+	g_lastAttack.resize(33);
 	
 	g_Hooks.RegisterHook( Hooks::Player::ClientSay, @ClientSay );
 	g_Hooks.RegisterHook( Hooks::Game::EntityCreated, @EntityCreated );
@@ -181,15 +184,6 @@ void PluginInit()  {
 	g_monster_blacklist["monster_sitting_scientist"] = true;
 	g_monster_blacklist["monster_tripmine"] = true;
 	
-	// disabling turrets would make defendthefort boss harder
-	//g_monster_blacklist["monster_sentry"] = true;
-	//g_monster_blacklist["monster_miniturret"] = true;
-	//g_monster_blacklist["monster_turret"] = true;
-	
-	if (g_Engine.time > 4) { // plugin reloaded mid-map?
-		late_init();
-	}
-	
 	g_no_compensate_weapons["weapon_crowbar"] = true;
 	g_no_compensate_weapons["weapon_pipewrench"] = true;
 	g_no_compensate_weapons["weapon_medkit"] = true;
@@ -202,6 +196,12 @@ void PluginInit()  {
 	g_no_compensate_weapons["weapon_snark"] = true;
 	g_no_compensate_weapons["weapon_sporelauncher"] = true;
 	g_no_compensate_weapons["weapon_displacer"] = true;
+	
+	g_custom_hitmark_ents["func_breakable_custom"] = true;
+	
+	if (g_Engine.time > 4) { // plugin reloaded mid-map?
+		late_init();
+	}
 	
 	g_Scheduler.SetInterval("rewind_stats", 1.0f, -1);
 	
@@ -248,12 +248,12 @@ void rewind_stats() {
 }
 
 void add_lag_comp_ent(CBaseEntity@ ent) {
-	if (ent.IsMonster()) {
+	if (ent.IsMonster() && string(ent.pev.classname).Find("monster_") == 0) {
 		if (g_monster_blacklist.exists(ent.pev.classname)) {
 			return;
 		}
 		laggyEnts.insertLast(LagEnt(ent));
-	} else if (ent.IsBreakable()) {
+	} else if (ent.IsBreakable() or g_custom_hitmark_ents.exists(ent.pev.classname)) {
 		hitmarkEnts.insertLast(HitmarkEnt(ent));
 	}
 }
@@ -261,31 +261,11 @@ void add_lag_comp_ent(CBaseEntity@ ent) {
 void reload_ents() {
 	laggyEnts.resize(0);
 	hitmarkEnts.resize(0);
-
-	CBaseEntity@ ent;
-	do {
-		@ent = g_EntityFuncs.FindEntityByClassname(ent, "monster_*");
-		if (ent !is null)
-		{
-			add_lag_comp_ent(ent);
-		}
-	} while(ent !is null);
 	
-	@ent = null;
-	do {
-		@ent = g_EntityFuncs.FindEntityByClassname(ent, "player");
-		if (ent !is null)
-		{
-			CBasePlayer@ plr = cast<CBasePlayer@>(ent);
-			if (plr.IsConnected())
-				add_lag_comp_ent(ent);
-		}
-	} while(ent !is null);
-	
-	@ent = null;
+	CBaseEntity@ent = null;
 	do {
 		@ent = g_EntityFuncs.FindEntityByClassname(ent, "*");
-		if (ent !is null && ent.IsBreakable())
+		if (ent !is null)
 		{
 			add_lag_comp_ent(ent);
 		}
@@ -383,7 +363,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		if (mon is null) {
 			continue;
 		}
-		if (lagEnt.history.size() == 0 || mon.entindex() == plr.entindex() || mon.pev.deadflag != DEAD_NO) {
+		if (lagEnt.history.size() <= 1 || mon.entindex() == plr.entindex() || mon.pev.deadflag != DEAD_NO) {
 			//println("Not enough history for monster");
 			continue;
 		}
@@ -403,8 +383,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 					break;
 				}
 			}
-			
-			if (bestHistoryIdx == 0) {
+			if (bestHistoryIdx == 0 || useHistoryIdx == 0) {
 				continue;
 			}
 		}
@@ -521,9 +500,7 @@ HookReturnCode EntityCreated(CBaseEntity@ ent){
 		return HOOK_CONTINUE;
 	}
 	
-	if (string(ent.pev.classname).Find("monster_") == 0 || ent.IsBreakable()) {
-		add_lag_comp_ent(ent);
-	}
+	add_lag_comp_ent(ent);
 	
 	return HOOK_CONTINUE;
 }
@@ -616,6 +593,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	
 	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
 	if (wep !is null && !g_no_compensate_weapons.exists(wep.pev.classname)) {
+		//println("COMP? " + wep.pev.classname);
 
 		if (will_weapon_fire_this_frame(plr, wep)) {
 			//println("COMPENSATE " + g_Engine.time);
@@ -647,6 +625,9 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 	PlayerState@ state = getPlayerState(plr);
 	
 	bool didPlayerShoot = wep.m_iClip != playerPostThinkAmmo;
+	
+	if (didPlayerShoot)
+		g_lastAttack[plr.entindex()] = g_Engine.time;
 	
 	CBaseEntity@ hitTarget = undo_rewind_monsters(state, didPlayerShoot);
 	if (state.hitmarker && hitTarget !is null) {
