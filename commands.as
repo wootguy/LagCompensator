@@ -18,7 +18,31 @@ void debug_stats(CBasePlayer@ debugger) {
 		}
 	}
 	
-	g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, '\nPlayers using compensation (' + count + ' / ' + total + '):\n');
+	g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "\nCompensated entities (" + laggyEnts.size() + "):\n");
+	for (uint i = 0; i < laggyEnts.size(); i++ )
+	{
+		LagEnt lagEnt = laggyEnts[i];
+		CBaseEntity@ ent = lagEnt.h_ent;
+		string cname = ent !is null ? string(ent.pev.classname) : "null";
+		if (ent !is null and ent.IsPlayer()) {
+			cname = ent.pev.netname;
+		}
+		
+		g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "    " + cname + ": " + lagEnt.history.size() + " states\n");
+	}
+	
+	g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "\nHitmark-only entities (" + hitmarkEnts.size() + "):\n    ");
+	for (uint i = 0; i < hitmarkEnts.size(); i++ )
+	{
+		HitmarkEnt hitmarkEnt = hitmarkEnts[i];
+		CBaseEntity@ ent = hitmarkEnt.h_ent;
+		string cname = ent !is null ? string(ent.pev.classname) : "null";		
+		g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, cname + ", ");
+		if (i % 8 == 0)
+			g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "\n    ");
+	}
+	
+	g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, '\n\nPlayers using compensation (' + count + ' / ' + total + '):\n');
 	
 	for ( int i = 1; i <= g_Engine.maxClients; i++ )
 	{
@@ -36,23 +60,14 @@ void debug_stats(CBasePlayer@ debugger) {
 				mode = "ping -" + state.compensation + "ms";
 			}
 			
-			mode += ", hitmarks " + (state.hitmarker ? "ON" : "OFF") + ", debug " + state.debug;
+			string name = plr.pev.netname;
+			while (name.Length() < 16) {
+				name += " ";
+			}
+			mode = "hitmarks " + (state.hitmarker ? "ON" : "OFF") + ", debug " + state.debug + ", " + mode;
 				
-			g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, '    ' + plr.pev.netname + ": " + mode + "\n");
+			g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, '    ' + name + ": " + mode + "\n");
 		}
-	}
-	
-	g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "\nCompensated entities (" + laggyEnts.size() + "):\n");
-	for (uint i = 0; i < laggyEnts.size(); i++ )
-	{
-		LagEnt lagEnt = laggyEnts[i];
-		CBaseEntity@ ent = lagEnt.h_ent;
-		string cname = ent !is null ? string(ent.pev.classname) : "null";
-		if (ent !is null and ent.IsPlayer()) {
-			cname = ent.pev.netname;
-		}
-		
-		g_PlayerFuncs.ClientPrint(debugger, HUD_PRINTCONSOLE, "    " + cname + ": " + lagEnt.history.size() + " states\n");
 	}
 }
 
@@ -92,7 +107,7 @@ void debug_perf(EHandle h_plr) {
 	}
 	
 	
-	string info = "RPS: " + g_stat_rps + ", CPS: " + g_stat_comps + "\nEntities: " + laggyEnts.size();
+	string info = "OPS: " + g_stat_rps + ", CPS: " + g_stat_comps + "\nOps/shot: " + ((laggyEnts.size()-1) + hitmarkEnts.size()/4);
 	
 	g_PlayerFuncs.HudMessage(plr, params, info);
 	

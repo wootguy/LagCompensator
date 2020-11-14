@@ -37,6 +37,7 @@ CScheduledFunction@ update_interval = null;
 CScheduledFunction@ cleanup_interval = null;
 
 array<LagEnt> laggyEnts; // ents that are lag compensated
+array<HitmarkEnt> hitmarkEnts; // ents that show hitmarkers but aren't lag compensated
 dictionary g_monster_blacklist; // don't track these - waste of time
 dictionary g_player_states;
 dictionary g_no_compensate_weapons; // skip compensating these weapons to improve performance
@@ -142,6 +143,17 @@ class LagEnt {
 	}
 }
 
+class HitmarkEnt {
+	EHandle h_ent;
+	float currentHealth; // used to detect if player shot this breakable
+	
+	HitmarkEnt() {}
+	
+	HitmarkEnt(CBaseEntity@ ent) {
+		h_ent = EHandle(ent);
+	}
+}
+
 void PluginInit()  {
 	g_Module.ScriptInfo.SetAuthor( "w00tguy" );
 	g_Module.ScriptInfo.SetContactInfo( "https://github.com/wootguy" );
@@ -238,14 +250,19 @@ void rewind_stats() {
 }
 
 void add_lag_comp_ent(CBaseEntity@ ent) {
-	if (g_monster_blacklist.exists(ent.pev.classname)) {
-		return;
+	if (ent.IsMonster()) {
+		if (g_monster_blacklist.exists(ent.pev.classname)) {
+			return;
+		}
+		laggyEnts.insertLast(LagEnt(ent));
+	} else if (ent.IsBreakable()) {
+		hitmarkEnts.insertLast(HitmarkEnt(ent));
 	}
-	laggyEnts.insertLast(LagEnt(ent));
 }
 
 void reload_ents() {
 	laggyEnts.resize(0);
+	hitmarkEnts.resize(0);
 
 	CBaseEntity@ ent;
 	do {
@@ -266,13 +283,23 @@ void reload_ents() {
 				add_lag_comp_ent(ent);
 		}
 	} while(ent !is null);
+	
+	@ent = null;
+	do {
+		@ent = g_EntityFuncs.FindEntityByClassname(ent, "*");
+		if (ent !is null && ent.IsBreakable())
+		{
+			add_lag_comp_ent(ent);
+		}
+	} while(ent !is null);
 }
 
 // removes deleted ents
 void cleanup_ents() {
 	array<LagEnt> newLagEnts;
+	array<HitmarkEnt> newHitmarkEnts;
 	for (uint i = 0; i < laggyEnts.size(); i++) {
-		CBaseMonster@ mon = cast<CBaseMonster@>(laggyEnts[i].h_ent.GetEntity());
+		CBaseEntity@ mon = laggyEnts[i].h_ent.GetEntity();
 		
 		if (mon is null or (mon.pev.deadflag != DEAD_NO && !mon.IsPlayer())) {
 			continue;
@@ -286,7 +313,18 @@ void cleanup_ents() {
 		
 		newLagEnts.insertLast(laggyEnts[i]);
 	}
+	
+	for (uint i = 0; i < hitmarkEnts.size(); i++) {
+		CBaseEntity@ ent = hitmarkEnts[i].h_ent;
+		
+		if (ent is null) {
+			continue;
+		}		
+		newHitmarkEnts.insertLast(hitmarkEnts[i]);
+	}
+	
 	laggyEnts = newLagEnts;
+	hitmarkEnts = newHitmarkEnts;
 }
 
 void update_ent_history() {
@@ -343,7 +381,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		
 		LagEnt@ lagEnt = laggyEnts[i];
-		CBaseMonster@ mon = cast<CBaseMonster@>(lagEnt.h_ent.GetEntity());
+		CBaseEntity@ mon = lagEnt.h_ent;
 		
 		if (mon is null) {
 			continue;
@@ -393,7 +431,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 		mon.pev.angles = t >= 0.5f ? newState.angles : oldState.angles;
 		mon.pev.origin = oldState.origin + (newState.origin - oldState.origin)*t;
 
-		mon.m_LastHitGroup = -1337; // for detecting hits on things that don't take damage from bullets (garg)
+		//mon.m_LastHitGroup = -1337; // for detecting hits on things that don't take damage from bullets (garg)
 		
 		if (state.debug > 1) {
 			EntState tweenState;
@@ -404,6 +442,19 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 			lagEnt.debugState = tweenState;
 		}
 	}
+	
+	if (state.hitmarker) {
+		for (uint i = 0; i < hitmarkEnts.size(); i++) {
+			CBaseEntity@ ent = hitmarkEnts[i].h_ent;
+			if (ent is null) {
+				continue;
+			}
+			hitmarkEnts[i].currentHealth = ent.pev.health;
+		}
+		
+		// not as heavy as a rewind, but this loop still impacts performance at high frequencies
+		g_rewind_count += hitmarkEnts.size() / 4;
+	}
 }
 
 CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
@@ -411,26 +462,41 @@ CBaseEntity@ undo_rewind_monsters(PlayerState@ state, bool didShoot) {
 	
 	for (uint i = 0; i < laggyEnts.size(); i++) {
 		LagEnt@ lagEnt = laggyEnts[i];
-		CBaseMonster@ mon = cast<CBaseMonster@>(lagEnt.h_ent.GetEntity());
-		if (!lagEnt.isRewound or mon is null) {
+		CBaseEntity@ ent = lagEnt.h_ent;
+		if (!lagEnt.isRewound or ent is null) {
 			continue;
 		}
 
 		// move back to current position
-		mon.pev.origin = lagEnt.currentState.origin;
-		mon.pev.sequence = lagEnt.currentState.sequence;
-		mon.pev.frame = lagEnt.currentState.frame;
-		mon.pev.angles = lagEnt.currentState.angles;
+		ent.pev.origin = lagEnt.currentState.origin;
+		ent.pev.sequence = lagEnt.currentState.sequence;
+		ent.pev.frame = lagEnt.currentState.frame;
+		ent.pev.angles = lagEnt.currentState.angles;
 		
 		lagEnt.isRewound = false;
 		
-		if (state.debug > 1 && didShoot) {
+		if (state.debug > 1 && didShoot && ent.IsMonster()) {
+			CBaseMonster@ mon = cast<CBaseMonster@>(ent);
 			debug_rewind(mon, lagEnt.debugState);
 		}
 		
-		if (mon.pev.health != lagEnt.currentHealth || (mon.m_LastHitGroup != -1337 && mon.IsPlayer())) {
+		if (ent.pev.health != lagEnt.currentHealth) {
 			//hits++;
-			@hitTarget = @mon;
+			@hitTarget = @ent;
+		}
+	}
+	
+	if (state.hitmarker) {
+		for (uint i = 0; i < hitmarkEnts.size(); i++) {
+			CBaseEntity@ ent = hitmarkEnts[i].h_ent;
+			if (ent is null) {
+				continue;
+			}
+			if (ent.pev.health != hitmarkEnts[i].currentHealth) {
+				//hits++;
+				@hitTarget = @ent;
+				println("HIT " + ent.pev.classname + " " + hitmarkEnts[i].currentHealth + " " + ent.pev.health);
+			}
 		}
 	}
 	
@@ -459,7 +525,7 @@ HookReturnCode EntityCreated(CBaseEntity@ ent){
 		return HOOK_CONTINUE;
 	}
 	
-	if (string(ent.pev.classname).Find("monster_") == 0) {
+	if (string(ent.pev.classname).Find("monster_") == 0 || ent.IsBreakable()) {
 		add_lag_comp_ent(ent);
 	}
 	
