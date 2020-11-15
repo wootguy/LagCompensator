@@ -14,9 +14,10 @@ bool will_custom_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep
 	int buttons = plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonReleased;
 	bool primaryFirePressed = buttons & IN_ATTACK != 0;
 	bool secondaryFirePressed = buttons & IN_ATTACK2 != 0;
-	bool inWater = plr.pev.waterlevel == 3;
+	bool inWater = plr.pev.waterlevel == WATERLEVEL_HEAD;
 	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && wep.m_iPrimaryAmmoType != -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
 	bool hasSecondaryAmmo = wep.m_iClip2 > 0 || (wep.m_iClip2 == -1 && wep.m_iSecondaryAmmoType != -1 && plr.m_rgAmmo( wep.m_iSecondaryAmmoType ) > 0);
+	bool secondaryFireReleased = (plr.m_afButtonPressed & IN_ATTACK2) == 0 && (lastPlrButtons[plr.entindex()] & IN_ATTACK2) != 0;
 	string weaponName = wep.pev.classname;
 	string mapName = g_Engine.mapname;
 	
@@ -25,6 +26,28 @@ bool will_custom_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep
 	bool secondaryAttacking = secondaryFirePressed && wep.m_flNextSecondaryAttack < g_Engine.time;
 	
 	// map-specific weapons
+	if (mapName.Find("cracklife_") == 0) {
+		
+		if (weaponName == "weapon_clgauss") {
+			if (secondaryFireReleased) {
+				return !inWater;
+			} else {
+				return primaryAttacking && !secondaryFirePressed && hasPrimaryAmmo && !inWater;
+			}
+		}
+		else if (weaponName == "weapon_clglock") {
+			return hasPrimaryAmmo && !wep.m_fInReload && (primaryAttacking || secondaryAttacking);
+		}
+		else if (weaponName == "weapon_clmp5") {
+			return primaryAttacking && hasPrimaryAmmo && !secondaryFirePressed && !inWater;
+		}
+		else if (weaponName == "weapon_clpython") {
+			return primaryAttacking && hasPrimaryAmmo && !wep.m_fInReload && !inWater;
+		}
+		else if (weaponName == "weapon_clshotgun") {
+			return (primaryAttacking || secondaryAttacking) && hasPrimaryAmmo && !inWater;
+		}
+	}
 	if (mapName == "pizza_ya_san1" || mapName == "pizza_ya_san2") {			
 		if (weaponName == "weapon_as_shotgun") {
 			return (primaryAttacking || secondaryAttacking) && !inWater && hasPrimaryAmmo;
@@ -41,9 +64,6 @@ bool will_custom_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep
 			return primaryAttacking && hasPrimaryAmmo && !secondaryFirePressed;
 		}
 	}
-	else if (mapName == "the_dust") {
-		return primaryAttacking && hasPrimaryAmmo && !secondaryFirePressed;
-	} 
 	else if (mapName.Find("rust_") == 0) {
 		float cooldownTime = 0;
 		float reloadTime = 0;
@@ -80,6 +100,9 @@ bool will_custom_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep
 		}
 		
 		return is_weapon_custom_cooled_down(plr, wep, cooldownTime, reloadTime, maxClip, noAutofire) && !inWater; 
+	}
+	else if (mapName == "the_dust") {
+		return primaryAttacking && hasPrimaryAmmo && !secondaryFirePressed;
 	}
 
 	// plugin weapons

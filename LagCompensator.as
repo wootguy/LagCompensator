@@ -2,17 +2,15 @@
 #include "commands"
 #include "util"
 
-// TODO:
+// minor todo:
 // - auto-enable for high pings?
 // - global history timestep
-// - update PVS of player and only rewind ents near them?
-// - rewind breakables/doors for clickies
-
-// minor todo:
+// - rewind moving objects too?
 // - compensate moving platforms somehow?
 // - compensate moving breakable solids and/or buttons
 // - custom weapon support for all maps and plugins (ohgod)
 // - double shotgun compensated while reloading
+// - update PVS of player and only rewind ents near them?
 
 // Ping colors:
 // <75 = green
@@ -20,9 +18,6 @@
 // 151+ = yellow
 // 251+ = orange
 // 401+ = red
-
-// unfixable bugs:
-// - blood effect shows in the unlagged position
 
 const float MAX_LAG_COMPENSATION_SECONDS = 1.0f; // don't set too high or else newly spawned monsters take too long to be compensated
 const string hitmarker_spr = "sprites/misc/mlg.spr";
@@ -533,59 +528,59 @@ bool will_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 		return false;
 
 	int buttons = plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonReleased;
-	bool primaryFire = buttons & IN_ATTACK != 0;
-	bool secondaryFire = buttons & IN_ATTACK2 != 0;
+	bool primaryFirePressed = buttons & IN_ATTACK != 0;
+	bool secondaryFirePressed = buttons & IN_ATTACK2 != 0;
 	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
 	bool hasSecondaryAmmo = wep.m_iClip2 > 0;
 	bool primaryFireIsNow = wep.m_flNextPrimaryAttack <= 0;
 	bool inWater = plr.pev.waterlevel == 3;
 	
 	if (wep.pev.classname == "weapon_9mmhandgun") {
-		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && (primaryFire || secondaryFire);
+		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && (primaryFirePressed || secondaryFirePressed);
 	}
 	else if (wep.pev.classname == "weapon_9mmAR") {
-		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !secondaryFire && !inWater;
+		return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFirePressed && !secondaryFirePressed && !inWater;
 	}
 	else if (wep.pev.classname == "weapon_shotgun") {
-		bool firing = (primaryFire && primaryFireIsNow) || (secondaryFire && wep.m_flNextSecondaryAttack <= 0);
+		bool firing = (primaryFirePressed && primaryFireIsNow) || (secondaryFirePressed && wep.m_flNextSecondaryAttack <= 0);
 		return hasPrimaryAmmo && !wep.m_fInReload && firing && !inWater;
 	}
 	else if (wep.pev.classname == "weapon_m16") {
 		// will fire this frame if primary delay goes positive (bullet 1)
 		// or if secondary delay goes positive after the first bullet (bullet 2+3)
-		bool shotFirstBullet = primaryFire && wep.m_flNextPrimaryAttack >= 0 && lastM16Delay1[plr.entindex()] < 0;
+		bool shotFirstBullet = primaryFirePressed && wep.m_flNextPrimaryAttack >= 0 && lastM16Delay1[plr.entindex()] < 0;
 		bool shotBurstBullet = wep.m_flNextSecondaryAttack < 0 && lastM16Delay2[plr.entindex()] >= 0 && wep.m_flNextPrimaryAttack > 0.2f;
 		bool firing = shotFirstBullet || shotBurstBullet;
 
 		lastM16Delay1[plr.entindex()] = wep.m_flNextPrimaryAttack;
 		lastM16Delay2[plr.entindex()] = wep.m_flNextSecondaryAttack;
 		
-		return hasPrimaryAmmo && firing && !wep.m_fInReload && !secondaryFire && !inWater;
+		return hasPrimaryAmmo && firing && !wep.m_fInReload && !secondaryFirePressed && !inWater;
 	}
 	else if (wep.pev.classname == "weapon_uzi") {
 		if (wep.m_fIsAkimbo) {
-			return primaryFire && (hasPrimaryAmmo || hasSecondaryAmmo) && primaryFireIsNow && !wep.m_fInReload && !inWater;
+			return primaryFirePressed && (hasPrimaryAmmo || hasSecondaryAmmo) && primaryFireIsNow && !wep.m_fInReload && !inWater;
 		} else {
-			return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !secondaryFire && !inWater;
+			return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFirePressed && !secondaryFirePressed && !inWater;
 		}
 	}
 	else if (wep.pev.classname == "weapon_gauss") {		
 		if ((plr.m_afButtonPressed & IN_ATTACK2) == 0 && (lastPlrButtons[plr.entindex()] & IN_ATTACK2) != 0) {
 			return !inWater;
 		} else {
-			return primaryFire && !secondaryFire && hasPrimaryAmmo && !inWater;
+			return primaryFirePressed && !secondaryFirePressed && hasPrimaryAmmo && !inWater;
 		}
 	}
 	else if (wep.pev.classname == "weapon_egon") {
-		return hasPrimaryAmmo && (primaryFire && !secondaryFire) && wep.pev.dmgtime < g_Engine.time && wep.m_flNextPrimaryAttack < g_Engine.time && !inWater;
+		return hasPrimaryAmmo && (primaryFirePressed && !secondaryFirePressed) && wep.pev.dmgtime < g_Engine.time && wep.m_flNextPrimaryAttack < g_Engine.time && !inWater;
 	}
 	else if (wep.pev.classname == "weapon_shockrifle") {
 		float nextDmg = wep.pev.dmgtime - g_Engine.time;
-		return hasPrimaryAmmo && wep.m_flNextSecondaryAttack <= 0 && secondaryFire && nextDmg < 0 && !inWater;
+		return hasPrimaryAmmo && wep.m_flNextSecondaryAttack <= 0 && secondaryFirePressed && nextDmg < 0 && !inWater;
 	}
 	
 	// 357, deagle, saw, sniper
-	return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !inWater;
+	return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFirePressed && !inWater;
 }
 
 // called before weapon shoot code
