@@ -599,14 +599,15 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
 	if (wep !is null && !g_no_compensate_weapons.exists(wep.pev.classname)) {
 		//println("COMP? " + wep.pev.classname);
+		
+		PlayerState@ state = getPlayerState(plr);
 
-		if (will_weapon_fire_this_frame(plr, wep)) {
+		if (state.enabled && will_weapon_fire_this_frame(plr, wep)) {
 			//println("COMPENSATE " + g_Engine.time);
 			playerWasCompensated = true;
 			g_compensations++;
 			
 			playerPostThinkAmmo = wep.m_iClip;
-			PlayerState@ state = getPlayerState(plr);
 			rewind_monsters(plr, state);
 		}
 		

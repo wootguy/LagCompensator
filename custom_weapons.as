@@ -75,6 +75,8 @@ bool will_custom_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep
 			maxClip = 6;
 			cooldownTime = 1.0;
 			reloadTime = 0.6;
+		} else {
+			return false;
 		}
 		
 		return is_weapon_custom_cooled_down(plr, wep, cooldownTime, reloadTime, maxClip, noAutofire) && !inWater; 
