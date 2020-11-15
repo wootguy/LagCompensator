@@ -248,7 +248,7 @@ void rewind_stats() {
 }
 
 void add_lag_comp_ent(CBaseEntity@ ent) {
-	if (ent.IsMonster() && string(ent.pev.classname).Find("monster_") == 0) {
+	if (ent.IsMonster() && (ent.IsPlayer() || string(ent.pev.classname).Find("monster_") == 0)) {
 		if (g_monster_blacklist.exists(ent.pev.classname)) {
 			return;
 		}
@@ -562,8 +562,12 @@ bool will_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 		
 		return hasPrimaryAmmo && firing && !wep.m_fInReload && !secondaryFire && !inWater;
 	}
-	else if (wep.pev.classname == "weapon_uzi" && wep.m_fIsAkimbo) {
-		return primaryFire && (hasPrimaryAmmo || hasSecondaryAmmo) && primaryFireIsNow && !wep.m_fInReload && !inWater;
+	else if (wep.pev.classname == "weapon_uzi") {
+		if (wep.m_fIsAkimbo) {
+			return primaryFire && (hasPrimaryAmmo || hasSecondaryAmmo) && primaryFireIsNow && !wep.m_fInReload && !inWater;
+		} else {
+			return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !secondaryFire && !inWater;
+		}
 	}
 	else if (wep.pev.classname == "weapon_gauss") {		
 		if ((plr.m_afButtonPressed & IN_ATTACK2) == 0 && (lastPlrButtons[plr.entindex()] & IN_ATTACK2) != 0) {
@@ -580,6 +584,7 @@ bool will_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 		return hasPrimaryAmmo && wep.m_flNextSecondaryAttack <= 0 && secondaryFire && nextDmg < 0 && !inWater;
 	}
 	
+	// 357, deagle, saw, sniper
 	return hasPrimaryAmmo && primaryFireIsNow && !wep.m_fInReload && primaryFire && !inWater;
 }
 
