@@ -383,6 +383,10 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 			}
 		}
 		
+		if (useHistoryIdx >= int(lagEnt.history.size())) { // TODO: why is this possible
+			continue;
+		}
+		
 		lagEnt.isRewound = true;		
 		lagEnt.currentState.origin = mon.pev.origin;
 		lagEnt.currentState.angles = mon.pev.angles;
