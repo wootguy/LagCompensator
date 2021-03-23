@@ -383,7 +383,7 @@ void rewind_monsters(CBasePlayer@ plr, PlayerState@ state) {
 			}
 		}
 		
-		if (useHistoryIdx >= int(lagEnt.history.size())) { // TODO: why is this possible
+		if (useHistoryIdx >= int(lagEnt.history.size()) || bestHistoryIdx >= int(lagEnt.history.size())) {
 			continue;
 		}
 		
@@ -534,7 +534,7 @@ bool will_weapon_fire_this_frame(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 	int buttons = plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonReleased;
 	bool primaryFirePressed = buttons & IN_ATTACK != 0;
 	bool secondaryFirePressed = buttons & IN_ATTACK2 != 0;
-	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
+	bool hasPrimaryAmmo = wep.m_iClip > 0 || (wep.m_iClip == -1 && wep.m_iPrimaryAmmoType != -1 && plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) > 0);
 	bool hasSecondaryAmmo = wep.m_iClip2 > 0;
 	bool primaryFireIsNow = wep.m_flNextPrimaryAttack <= 0;
 	bool inWater = plr.pev.waterlevel == 3;
