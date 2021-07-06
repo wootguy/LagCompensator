@@ -133,6 +133,11 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				} 
 				else if (arg == "x" || arg == "hitmarker") {
 					state.hitmarker = !state.hitmarker;
+					
+					if (args.ArgC() > 2) {
+						state.hitmarker = atoi(args[2]) != 0;
+					}
+					
 					if (state.hitmarker) {
 						state.enabled = true;
 					}
@@ -253,7 +258,7 @@ bool doCommand(CBasePlayer@ plr, const CCommand@ args, bool isConsoleCommand=fal
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        Try matching it with the ping you see in net_graph.\n');
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        The net_graph ping might be more accurate than the scoreboard.\n');
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        To turn on net_graph, type \'net_graph 2\' in this console.\n');
-				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc x" to toggle hit confirmations.\n');
+				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '    Type ".lagc x [0/1]" to toggle hit confirmations.\n');
 				g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, '        This will make it obvious when you hit a target.\n');
 				
 				if (isAdmin) {
@@ -304,7 +309,6 @@ HookReturnCode ClientSay( SayParameters@ pParams ) {
 	if (doCommand(plr, args, false))
 	{
 		pParams.ShouldHide = true;
-		return HOOK_HANDLED;
 	}
 	return HOOK_CONTINUE;
 }
