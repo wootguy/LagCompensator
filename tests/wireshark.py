@@ -115,7 +115,32 @@ entity_state_t = [
 	Delta( 'gaitsequence', DT_INTEGER, 8, 1.0 )
 ]
 
+super_string = ""
+replay_txt = open('replay.txt', 'w')
+replay_txt.write('array<array<uint8>> replay = {')
 
+def process_voice_packet(data):
+	idx = data.find(b'\x35')
+	if idx != -1:
+		#os.system('cls' if os.name == 'nt' else 'clear')
+		deltaPacket = BitStream(data[idx+1:])
+		playerIdx = deltaPacket.read('uintle:8')
+		length = deltaPacket.read('uintle:16')
+		
+		if playerIdx != 0:
+			return
+		
+		print("Parse svc_voicedata, idx %d, len %d" % (playerIdx, length) )
+		
+		byte_str = "\t{"
+		for x in range(0, length):
+			byte_str += "%d, " % deltaPacket.read('uintle:8')
+			
+		byte_str = byte_str[:-2] + "},"
+		replay_txt.write(byte_str + "\n")
+		
+		print(byte_str)
+		
 def process_packet(data):
 
 	idx = data.rfind(b'\x29')
@@ -230,12 +255,14 @@ def process_sniffed_packets(packet):
 	#print("WOW %s" % payload)
 	#print("WOW2 %s" % payload[0])
 	try:
-		process_packet(payload)
+		#process_packet(payload)
+		process_voice_packet(payload)
 	except Exception as e:
 		print("Failed to parse packet: %s" % e)
 
 def sniff():
-	scapy.sniff(iface='Software Loopback Interface 1', filter="udp and port 27015", store=False, prn=process_sniffed_packets)
+	#scapy.sniff(iface='Software Loopback Interface 1', filter="udp and port 27015", store=False, prn=process_sniffed_packets)
+	scapy.sniff(iface='Ethernet', filter="udp and port 27015", store=False, prn=process_sniffed_packets)
 		
 
 
