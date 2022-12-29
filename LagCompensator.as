@@ -491,7 +491,7 @@ void show_hit_marker(CBasePlayer@ plr, CBaseEntity@ target) {
 	params.channel = 15;
 	g_PlayerFuncs.HudCustomSprite(plr, params);
 	
-	g_SoundSystem.PlaySound(target.edict(), CHAN_AUTO, hitmarker_snd, 0.8f, 0.0f, 0, 100, plr.entindex());
+	g_SoundSystem.PlaySound(target.edict(), CHAN_ITEM, hitmarker_snd, 0.8f, 0.0f, 0, 100, plr.entindex());
 }
 
 HookReturnCode EntityCreated(CBaseEntity@ ent){
