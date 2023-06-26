@@ -21,7 +21,6 @@ bool g_enabled = true;
 float g_update_delay = 0.05f; // time between monster state updates
 ScheduledFunction update_interval; // time between removal of deleted entities from entity history
 ScheduledFunction cleanup_interval; // time between removal of deleted entities from entity history
-ScheduledFunction stats_interval; // how often to update rewind stats
 ScheduledFunction map_activate_sched; // how often to update rewind stats
 
 vector<LagEnt> laggyEnts; // ents that are lag compensated
@@ -31,9 +30,6 @@ set<string> g_custom_hitmark_ents;
 map<string, PlayerState*> g_player_states;
 set<string> g_no_compensate_weapons; // skip compensating these weapons to improve performance
 int g_state_count = 0;
-int g_rewind_count = 0;
-int g_stat_rps = 0;
-int g_stat_comps = 0;
 int lastPlrButtons[33]; // player button properties dont't work right for secondary/tertiary fire
 float lastM16Delay1[33]; // hack to figure out when the m16 will fire next
 float lastM16Delay2[33]; // hack to figure out when the m16 will fire next
@@ -110,14 +106,6 @@ PlayerState& getPlayerState(edict_t* plr) {
 
 PlayerState& getPlayerState(CBasePlayer* plr) {
 	return getPlayerState(plr->edict());
-}
-
-void rewind_stats() {
-	g_stat_rps = int(float(g_rewind_count) / 1.0f);
-	g_stat_comps = g_compensations;
-
-	g_rewind_count = 0;
-	g_compensations = 0;
 }
 
 void add_lag_comp_ent(CBaseEntity* ent) {
@@ -312,7 +300,6 @@ void rewind_monsters(CBasePlayer* plr, PlayerState& state) {
 			continue;
 		}
 
-		g_rewind_count++;
 		int useHistoryIdx = bestHistoryIdx;
 
 		// get state closest to the time the player shot
@@ -375,9 +362,6 @@ void rewind_monsters(CBasePlayer* plr, PlayerState& state) {
 			}
 			hitmarkEnts[i].currentHealth = ent->pev->health;
 		}
-
-		// not as heavy as a rewind, but this loop still impacts performance at high frequencies
-		g_rewind_count += hitmarkEnts.size() / 4;
 	}
 }
 
@@ -466,9 +450,6 @@ int EntityCreated(edict_t* pent) {
 void ClientJoin(edict_t* plr)
 {
 	PlayerState& state = getPlayerState(plr);
-	if (state.perfDebug) {
-		debug_perf(EHandle(plr));
-	}
 
 	add_lag_comp_ent((CBaseEntity*)plr->pvPrivateData);
 	RETURN_META(MRES_IGNORED);

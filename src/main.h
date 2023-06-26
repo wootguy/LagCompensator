@@ -21,7 +21,6 @@ struct PlayerState {
 	int adjustMode = 0;
 	int debug = 0;
 	bool hitmarker = false;
-	bool perfDebug = false; // show performance stats
 
 	// get ping time in seconds
 	float getCompensationPing(CBasePlayer* plr);
@@ -72,9 +71,6 @@ struct HitmarkEnt {
 extern vector<LagEnt> laggyEnts;
 extern vector<HitmarkEnt> hitmarkEnts;
 extern int g_state_count;
-extern int g_rewind_count;
-extern int g_stat_rps;
-extern int g_stat_comps;
 extern bool g_enabled;
 extern float g_update_delay;
 
@@ -84,12 +80,10 @@ extern const char* hitmarker_snd;
 
 extern ScheduledFunction update_interval; // time between removal of deleted entities from entity history
 extern ScheduledFunction cleanup_interval; // time between removal of deleted entities from entity history
-extern ScheduledFunction stats_interval; // how often to update rewind stats
 
 PlayerState& getPlayerState(edict_t* plr);
 PlayerState& getPlayerState(CBasePlayer* plr);
 
-void debug_perf(EHandle h_plr);
 void reload_ents();
 void update_ent_history();
 

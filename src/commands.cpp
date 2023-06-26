@@ -73,55 +73,6 @@ void debug_stats(edict_t* debugger) {
 	}
 }
 
-void debug_perf(EHandle h_plr) {
-	CBasePlayer* plr = (CBasePlayer*)h_plr.GetEntity();
-
-	if (!plr || !plr->IsConnected()) {
-		return;
-	}
-
-	hudtextparms_t params;
-	params.effect = 0;
-	params.fadeinTime = 0;
-	params.fadeoutTime = 0.1;
-	params.holdTime = 1.5f;
-
-	params.x = -1;
-	params.y = 0.99;
-	params.channel = 2;
-
-	if (g_stat_rps > 10000) {
-		params.r1 = 255;
-		params.g1 = 0;
-		params.b1 = 0;
-	}
-	else if (g_stat_rps > 5000) {
-		params.r1 = 255;
-		params.g1 = 128;
-		params.b1 = 0;
-	}
-	else if (g_stat_rps > 2500) {
-		params.r1 = 255;
-		params.g1 = 255;
-		params.b1 = 0;
-	}
-	else {
-		params.r1 = 0;
-		params.g1 = 255;
-		params.b1 = 0;
-	}
-
-
-	string info = UTIL_VarArgs("OPS: %d, CPS: %d\nOps/shot: %d", g_stat_rps, g_stat_comps, ((laggyEnts.size() - 1) + hitmarkEnts.size() / 4));
-
-	HudMessage(plr->edict(), params, info.c_str());
-
-	PlayerState& state = getPlayerState(plr);
-	if (state.perfDebug) {
-		g_Scheduler.SetTimeout(debug_perf, 1.0f, h_plr);
-	}
-}
-
 bool doCommand(edict_t* plr) {
 	PlayerState& state = getPlayerState(plr);
 	bool isAdmin = AdminLevel(plr) >= ADMIN_YES;
@@ -183,11 +134,6 @@ bool doCommand(edict_t* plr) {
 				}
 				else if (arg == "test" && isAdmin) {
 
-				}
-				else if (arg == "perf") {
-					state.perfDebug = !state.perfDebug;
-					if (state.perfDebug)
-						debug_perf(EHandle(plr));
 				}
 				else if (arg == "on") {
 					state.enabled = true;
