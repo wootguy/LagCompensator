@@ -1,5 +1,105 @@
 #include "meta_utils.h"
 #include "misc_utils.h"
+#include <chrono>
+
+const char* ADMIN_LIST_FILE = "svencoop/admins.txt";
+
+map<string, int> g_admins;
+
+#define MAX_CVARS 32
+
+cvar_t g_cvar_data[MAX_CVARS];
+int g_cvar_count = 0;
+
+cvar_t* RegisterCVar(char* name, char* strDefaultValue, int intDefaultValue, int flags) {
+	
+	if (g_cvar_count >= MAX_CVARS) {
+		println("Failed to add cvar '%s'. Increase MAX_CVARS and recompile.", name);
+		return NULL;
+	}
+
+	g_cvar_data[g_cvar_count].name = name;
+	g_cvar_data[g_cvar_count].string = strDefaultValue;
+	g_cvar_data[g_cvar_count].flags = flags | FCVAR_EXTDLL;
+	g_cvar_data[g_cvar_count].value = intDefaultValue;
+	g_cvar_data[g_cvar_count].next = NULL;
+
+	CVAR_REGISTER(&g_cvar_data[g_cvar_count]);
+
+	g_cvar_count++;
+
+	return CVAR_GET_POINTER(name);
+}
+
+bool cgetline(FILE* file, string& output) {
+	static char buffer[4096];
+
+	if (fgets(buffer, sizeof(buffer), file)) {
+		output = string(buffer);
+		if (output[output.length() - 1] == '\n') {
+			output = output.substr(0, output.length() - 1);
+		}
+		return true;
+	}
+
+	return false;
+}
+
+void LoadAdminList() {
+	g_admins.clear();
+	FILE* file = fopen(ADMIN_LIST_FILE, "r");
+
+	if (!file) {
+		string text = string("[Radio] Failed to open: ") + ADMIN_LIST_FILE + "\n";
+		println(text);
+		logln(text);
+		return;
+	}
+
+	string line;
+	while (cgetline(file, line)) {
+		if (line.empty()) {
+			continue;
+		}
+
+		// strip comments
+		int endPos = line.find_first_of(" \t#/\n");
+		string steamId = trimSpaces(line.substr(0, endPos));
+
+		if (steamId.length() < 1) {
+			continue;
+		}
+
+		int adminLevel = ADMIN_YES;
+
+		if (steamId[0] == '*') {
+			adminLevel = ADMIN_OWNER;
+			steamId = steamId.substr(1);
+		}
+
+		g_admins[steamId] = adminLevel;
+	}
+
+	println(UTIL_VarArgs("[Radio] Loaded %d admin(s) from file", g_admins.size()));
+
+	fclose(file);
+}
+
+int AdminLevel(edict_t* plr) {
+	string steamId = (*g_engfuncs.pfnGetPlayerAuthId)(plr);
+
+	if (!IS_DEDICATED_SERVER()) {
+		if (ENTINDEX(plr) == 1) {
+			return ADMIN_OWNER; // listen server owner is always the first player to join (I hope)
+		}
+	}
+
+	if (g_admins.find(steamId) != g_admins.end()) {
+		return g_admins[steamId];
+	}
+	
+	return ADMIN_NO;
+}
 
 CommandArgs::CommandArgs() {
 	

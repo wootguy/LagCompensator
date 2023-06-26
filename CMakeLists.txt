@@ -10,6 +10,10 @@ set(SOURCE_FILES
 	src/meta_init.h src/meta_init.cpp
 	src/meta_utils.h src/meta_utils.cpp
 	src/misc_utils.h src/misc_utils.cpp
+	src/Scheduler.h src/Scheduler.cpp
+	src/HUDSprite.h src/HUDSprite.cpp
+	src/StartSound.h src/StartSound.cpp
+	src/commands.cpp
 )
 
 include_directories(src)
@@ -31,7 +35,7 @@ if(MSVC)
 	set_target_properties(${PROJECT_NAME} PROPERTIES
 					  VS_STARTUP_PROJECT ${PROJECT_NAME}
 					  VS_DEBUGGER_COMMAND "svencoop.exe"
-					  VS_DEBUGGER_COMMAND_ARGUMENTS "+map stadium4 -nomsaa -nofbo -noborder -condebug"
+					  VS_DEBUGGER_COMMAND_ARGUMENTS "+map stadium3 +maxplayers 32 +developer 1 -nomsaa -nofbo -noborder -condebug -dll addons/metamod/dlls/metamod.dll"
 					  VS_DEBUGGER_WORKING_DIRECTORY "${SVEN_ROOT_PATH}")
 					  
 	# can't overwrite dll while its loaded but it can be renamed, then you can run "meta reload <plugin>" to update it in-game				
@@ -40,7 +44,7 @@ if(MSVC)
 	)
 
 else()
-	set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -m32 -g")
+	set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -m32 -g -fvisibility=hidden")
 	set(CMAKE_CXX_FLAGS_DEBUG "-O0")
 	set(CMAKE_CXX_FLAGS_RELEASE "-Os -fno-exceptions -w -Wfatal-errors")
 	target_compile_definitions(${PROJECT_NAME} PUBLIC -Dlinux)

@@ -9,6 +9,11 @@ private:
 	int		 m_serialnumber;
 
 public:
+	EHandle() {
+		m_pent = NULL;
+		m_serialnumber = -1;
+	}
+
 	EHandle(edict_t* ent) {
 		m_pent = ent;
 		m_serialnumber = m_pent ? m_pent->serialnumber : -1;
@@ -34,6 +39,9 @@ public:
 	}
 
 	bool IsValid() {
-		return m_pent && m_pent->serialnumber == m_serialnumber && m_pent->pvPrivateData;
+		return m_pent && m_pent->serialnumber == m_serialnumber;
 	}
+
+	operator CBaseEntity* () { return GetEntity(); }
+	operator edict_t* () { return GetEdict(); }
 };

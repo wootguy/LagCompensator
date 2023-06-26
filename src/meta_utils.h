@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 #include <map>
-#include <thread>
 #include <algorithm>
 
 using namespace std; // ohhh yesss
@@ -16,10 +15,8 @@ using namespace std; // ohhh yesss
 // get a player index as a bitfield index
 #define PLAYER_BIT(edt) (1 << (ENTINDEX(edt) % 32))
 
-extern thread::id g_main_thread_id;
-
-#define print(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), ##__VA_ARGS__);}
-#define log(fmt, ...) {ALERT(at_logged, (char*)string(fmt).c_str(), ##__VA_ARGS__);}
+#define println(fmt,...) {ALERT(at_console, (char*)(string(fmt) + "\n").c_str(), ##__VA_ARGS__);}
+#define logln(fmt, ...) {ALERT(at_logged, (char*)(string(fmt) + "\n").c_str(), ##__VA_ARGS__);}
 
 enum AdminLevel_t {
 	ADMIN_INIT = -1,
@@ -47,5 +44,11 @@ struct CommandArgs {
 	string getFullCommand();
 };
 
+string toLowerCase(string str);
+
+cvar_t* RegisterCVar(char* name, char* strDefaultValue, int intDefaultValue, int flags);
+
+void LoadAdminList(); // call on each map change, so AdminLevel can work
+int AdminLevel(edict_t* player);
 uint64_t getEpochMillis();
 double TimeDifference(uint64_t start, uint64_t end);

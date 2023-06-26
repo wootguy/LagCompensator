@@ -61,5 +61,13 @@ public:
     float m_flNextDecalTime; // Next time this player can spray a decal.
     byte u6_20[1896];
     int m_iPlayerClass; // The player's class type.
+
+    bool IsConnected() {
+        return true; /* return *((byte*)this + 3292); */
+    }
+
+    bool IsAlive() {
+        return !pev->deadflag && pev->health > 0.0f && IsConnected();
+    }
 };
 #pragma pack(pop)
