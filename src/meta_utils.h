@@ -52,3 +52,4 @@ void LoadAdminList(); // call on each map change, so AdminLevel can work
 int AdminLevel(edict_t* player);
 uint64_t getEpochMillis();
 double TimeDifference(uint64_t start, uint64_t end);
+bool cgetline(FILE* file, string& output);

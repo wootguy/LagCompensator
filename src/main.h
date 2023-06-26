@@ -9,6 +9,7 @@
 #include "HUDSprite.h"
 #include "StartSound.h"
 #include "Scheduler.h"
+#include "StartSound.h"
 
 struct PlayerState {
 	// Never store player handle? It needs to be set to null on disconnect or else states start sharing

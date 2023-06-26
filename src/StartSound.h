@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <extdll.h>
+#include <map>
 
 #define MSG_StartSound 107
 
@@ -41,3 +42,15 @@ struct StartSoundMsg {
 };
 
 void PlaySound(edict_t* entity, int channel, const std::string& sample, float volume, float attenuation, int flags = 0, int pitch = PITCH_NORM, int target_ent_unreliable = 0, bool setOrigin = false, const Vector& vecOrigin = Vector(0, 0, 0));
+
+// maps a file path to a sound index, for use with the StartSound network message
+extern std::map<std::string, int> g_SoundCache;
+
+// call this before using g_SoundCache, at the start of every map
+void loadSoundCacheFile(int attempts = 5);
+
+// sven has a special version of PrecacheSound, but metamod only has access to the engine func.
+// This requires the SoundCache angelscript plugin to be installed.
+// Do not call this outside of MapInit/ServerActivate.
+// This also includes the PrecacheGeneric call
+void PrecacheSound(std::string snd);

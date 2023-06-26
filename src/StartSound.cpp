@@ -3,11 +3,6 @@
 #include "misc_utils.h"
 
 void StartSoundMsg::send(int msg_dest, edict_t* target) {
-	if (soundIdx == -1) {
-		println("ZOMG FIND THE SOUDN INDEX");
-		return;
-	}
-
 	MESSAGE_BEGIN(msg_dest, MSG_StartSound, NULL, target);
 	WRITE_SHORT(flags);
 
@@ -55,7 +50,7 @@ void PlaySound(edict_t* entity, int channel, const std::string& sample, float vo
 	msg.flags = flags;
 	msg.pitch = pitch;
 	msg.origin = vecOrigin;
-	msg.soundIdx = -1;
+	msg.soundIdx = g_SoundCache[toLowerCase(sample)];
 
 	if (entity) {
 		msg.entindex = ENTINDEX(entity);
@@ -75,4 +70,58 @@ void PlaySound(edict_t* entity, int channel, const std::string& sample, float vo
 	else {
 		msg.send(MSG_ALL);
 	}
+}
+
+const string g_soundcache_folder = "svencoop/maps/soundcache/";
+std::map<std::string, int> g_SoundCache;
+
+void loadSoundCacheFile(int attempts) {
+	g_SoundCache.clear();
+
+	string soundcache_path = g_soundcache_folder + STRING(gpGlobals->mapname) + ".txt";
+	FILE* file = fopen(soundcache_path.c_str(), "r");
+	int idx = 0;
+
+	if (!file) {
+		if (attempts > 0) {
+			println("[SoundCache] Failed to open soundcache file (attempts left %d)", attempts);
+			g_Scheduler.SetTimeout(loadSoundCacheFile, 5, attempts - 1);
+		}
+		else {
+			logln(("[SoundCache] failed to open soundcache file: " + soundcache_path).c_str());
+		}
+		return;
+	}
+
+	string line;
+	bool parsingSounds = false;
+	while (cgetline(file, line)) {
+		if (line.empty()) {
+			continue;
+		}
+
+		if (!parsingSounds) {
+			if (line.find("SOUNDLIST {") == 0) {
+				parsingSounds = true;
+				continue;
+			}
+		}
+		else {
+			if (line.find("}") == 0) {
+				break;
+			}
+
+			g_SoundCache[toLowerCase(line)] = idx;
+			idx++;
+		}
+	}
+
+	fclose(file);
+
+	println("[SoundCache] Parsed %d sounds", g_SoundCache.size());
+}
+
+void PrecacheSound(string snd) {
+	g_engfuncs.pfnServerCommand((char*)("as_command .PrecacheSound " + snd + ";").c_str());
+	g_engfuncs.pfnServerExecute();
 }

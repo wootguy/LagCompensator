@@ -1,7 +1,5 @@
 #include "main.h"
 
-// TODO: MapActivate
-
 // Description of plugin
 plugin_info_t Plugin_info = {
 	META_INTERFACE_VERSION,	// ifvers
@@ -225,10 +223,16 @@ void stop_polling() {
 void late_init() {
 	reload_ents();
 	start_polling();
+
+	loadSoundCacheFile();
 }
 
-// TODO: this doesnt exist in metamod
 void MapActivate() {
+	if (gpGlobals->time < 2.0f) {
+		g_Scheduler.SetTimeout(MapActivate, 2.0f - gpGlobals->time);
+		return;
+	}
+
 	late_init();
 }
 
@@ -241,7 +245,7 @@ void MapInit(edict_t* pEdictList, int edictCount, int maxClients) {
 	// Not using PrecacheModel because HUD elements don't require the server to load the sprite
 	g_engfuncs.pfnPrecacheGeneric((char*)hitmarker_spr);
 
-	g_engfuncs.pfnPrecacheSound((char*)hitmarker_snd);
+	PrecacheSound(hitmarker_snd);
 	g_engfuncs.pfnPrecacheGeneric((char*)(string("sound/") + hitmarker_snd).c_str());
 
 	RETURN_META(MRES_IGNORED);
@@ -252,6 +256,7 @@ void MapInit_post(edict_t* pEdictList, int edictCount, int maxClients) {
 	// probably the server will freeze before map init is done
 	g_Scheduler.RemoveTimer(map_activate_sched);
 	map_activate_sched = g_Scheduler.SetTimeout(MapActivate, 2);
+	loadSoundCacheFile();
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -293,8 +298,6 @@ void rewind_monsters(CBasePlayer* plr, PlayerState& state) {
 	}
 
 	int bestHistoryIdx = 0;
-
-	println("REWIND %d monsters", laggyEnts.size());
 
 	for (int i = 0; i < laggyEnts.size(); i++) {
 
@@ -340,8 +343,6 @@ void rewind_monsters(CBasePlayer* plr, PlayerState& state) {
 		lagEnt.currentState.frame = mon->pev->frame;
 		lagEnt.currentHealth = mon->pev->health;
 		lagEnt.currentDeadFlag = mon->pev->deadflag;
-
-		println("OKIE %s", STRING(mon->pev->classname));
 
 		// interpolate between states to get the exact position the monster was in when the player shot
 		// this probably won't matter much unless the server framerate is really low.
@@ -443,12 +444,10 @@ void show_hit_marker(CBasePlayer* plr, CBaseEntity* target) {
 	PlaySound(target->edict(), CHAN_ITEM, hitmarker_snd, 0.8f, 0.0f, 0, 100, plr->entindex());
 }
 
-void EntityCreatedWait(EHandle h_ent, int waitLeft) {
+void EntityCreatedWait(EHandle h_ent) {
 	if (!h_ent.IsValid() || !h_ent.GetEntity()) {
 		return;
 	}
-
-	println("Entity created with %d waitleft", waitLeft);
 
 	add_lag_comp_ent(h_ent);
 }
@@ -458,7 +457,8 @@ int EntityCreated(edict_t* pent) {
 		RETURN_META_VALUE(MRES_IGNORED, 0);
 	}
 
-	g_Scheduler.SetTimeout(EntityCreatedWait, 0, EHandle(pent), 10);
+	// ents usually aren't initialized until the next frame
+	g_Scheduler.SetTimeout(EntityCreatedWait, 0, EHandle(pent));
 
 	RETURN_META_VALUE(MRES_IGNORED, 0);
 }
@@ -561,7 +561,7 @@ void PlayerPostThink(edict_t* ed_plr) {
 		PlayerState& state = getPlayerState(plr);
 
 		if (state.enabled && will_weapon_fire_this_frame(plr, wep)) {
-			println("COMPENSATE %.3f", gpGlobals->time);
+			//println("COMPENSATE %.3f", gpGlobals->time);
 			playerWasCompensated = true;
 			g_compensations++;
 
@@ -597,7 +597,6 @@ void PlayerPostThink_post(edict_t* ed_plr) {
 	CBaseEntity* hitTarget = undo_rewind_monsters(state, didPlayerShoot);
 	if (state.hitmarker && hitTarget) {
 		show_hit_marker(plr, hitTarget);
-		println("ZOMG HIT");
 	}
 
 	RETURN_META(MRES_IGNORED);
