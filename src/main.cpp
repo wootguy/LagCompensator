@@ -640,6 +640,8 @@ void PluginInit() {
 
 	g_custom_hitmark_ents.insert("func_breakable_custom");
 
+	LoadAdminList();
+
 	if (gpGlobals->time > 4) { // plugin reloaded mid-map?
 		late_init();
 	}

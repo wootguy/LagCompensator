@@ -37,7 +37,7 @@ void StartSoundMsg::send(int msg_dest, edict_t* target) {
 	MESSAGE_END();
 }
 
-void PlaySound(edict_t* entity, int channel, const std::string& sample, float volume, float attenuation, 
+void PlaySound(edict_t* entity, int channel, const std::string& sample, float volume, float attenuation,
 	int flags, int pitch, int target_ent_unreliable, bool setOrigin, const Vector& vecOrigin) {
 
 	edict_t* target = target_ent_unreliable ? INDEXENT(target_ent_unreliable) : NULL;
@@ -62,8 +62,11 @@ void PlaySound(edict_t* entity, int channel, const std::string& sample, float vo
 	if (pitch != PITCH_NORM) {
 		msg.flags |= SND_PITCH;
 	}
+	if (volume != 1.0f) {
+		msg.flags |= SND_VOLUME;
+	}
 	msg.flags |= SND_ATTENUATION; // TODO: make this conditional. idk what the default value is
-	
+
 	if (target) {
 		msg.send(MSG_ONE_UNRELIABLE, target);
 	}
