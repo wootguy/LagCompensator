@@ -1,0 +1,3 @@
+[submodule "mmlib"]
+	path = mmlib
+	url = https://github.com/wootguy/mmlib

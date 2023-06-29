@@ -7,27 +7,17 @@ project(LagCompensator)
 
 set(SOURCE_FILES
 	src/main.h src/main.cpp
-	src/meta_init.h src/meta_init.cpp
-	src/meta_utils.h src/meta_utils.cpp
-	src/misc_utils.h src/misc_utils.cpp
-	src/Scheduler.h src/Scheduler.cpp
-	src/HUDSprite.h src/HUDSprite.cpp
-	src/StartSound.h src/StartSound.cpp
 	src/commands.cpp
 )
 
-include_directories(src)
-include_directories(src/meta)
-include_directories(include/metamod)
-include_directories(include/hlsdk/common)
-include_directories(include/hlsdk/dlls)
-include_directories(include/hlsdk/engine)
-include_directories(include/hlsdk/pm_shared)
-include_directories(include/sven)
-
-add_library(${PROJECT_NAME} SHARED ${SOURCE_FILES})
+add_library(${PROJECT_NAME} SHARED)
+add_subdirectory(mmlib)
 
 if(MSVC)
+	source_group("Header Files\\sven" FILES ${SVEN_API_HEADERS})
+	source_group("Header Files\\mmlib" FILES ${META_HELPER_HEADERS})
+	source_group("Source Files\\mmlib" FILES ${META_HELPER_SOURCES})
+	
 	set_target_properties(${PROJECT_NAME} PROPERTIES
                       RUNTIME_OUTPUT_DIRECTORY_DEBUG "${SVEN_ROOT_PATH}/${DLL_INSTALL_PATH}"
                       RUNTIME_OUTPUT_DIRECTORY_RELEASE "${SVEN_ROOT_PATH}/${DLL_INSTALL_PATH}")

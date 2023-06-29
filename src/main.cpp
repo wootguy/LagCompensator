@@ -260,7 +260,7 @@ void debug_rewind(CBaseMonster* mon, EntState lastState) {
 	keys["model"] = STRING(mon->pev->model);
 	keys["rendermode"] = "1";
 	keys["renderamt"] = "200";
-	CBaseMonster* oldEnt = (CBaseMonster*)CreateEntity("cycler", keys, true)->pvPrivateData;
+	CBaseMonster* oldEnt = (CBaseMonster*)CreateEntity("cycler", keys, true);
 	oldEnt->pev->solid = SOLID_NOT;
 	oldEnt->pev->movetype = MOVETYPE_NOCLIP;
 

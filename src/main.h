@@ -1,15 +1,9 @@
 #pragma once
-#include "meta_init.h"
-#include "misc_utils.h"
-#include "meta_utils.h"
-#include "private_api.h"
+#include "mmlib.h"
 #include <set>
 #include <map>
-#include "Activity.h"
-#include "HUDSprite.h"
-#include "StartSound.h"
-#include "Scheduler.h"
-#include "StartSound.h"
+
+using namespace std;
 
 struct PlayerState {
 	// Never store player handle? It needs to be set to null on disconnect or else states start sharing
