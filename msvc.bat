@@ -1,0 +1,1 @@
+call mmlib\msvc.bat
